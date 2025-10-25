@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 
@@ -106,11 +107,16 @@ func (b *Bot) Start(ctx context.Context) error {
 		case <-ctx.Done():
 			return ctx.Err()
 		case update := <-updates:
-			if update.Message == nil {
+			// Handle callback queries (inline keyboard button clicks)
+			if update.CallbackQuery != nil {
+				b.handleCallbackQuery(ctx, update.CallbackQuery)
 				continue
 			}
 
-			b.handleMessage(ctx, update.Message)
+			// Handle messages
+			if update.Message != nil {
+				b.handleMessage(ctx, update.Message)
+			}
 		}
 	}
 }
@@ -131,32 +137,107 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	// Forward text message to Claude
+	// Handle keyboard button presses (execute commands directly)
 	if msg.Text != "" {
+		switch msg.Text {
+		case "📂 Sessions":
+			b.executeCommand(ctx, msg, "sessions", "")
+			return
+		case "📊 Status":
+			b.executeCommand(ctx, msg, "status", "")
+			return
+		case "📁 pwd":
+			b.executeCommand(ctx, msg, "pwd", "")
+			return
+		case "📋 ls":
+			b.executeCommand(ctx, msg, "ls", "")
+			return
+		case "ℹ️ Help":
+			b.executeCommand(ctx, msg, "start", "")
+			return
+		}
+
+		// Forward text message to Claude
 		b.forwardToClaude(ctx, msg)
 		return
 	}
 }
 
-// handleCommand handles bot commands
-func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
-	switch msg.Command() {
+// handleCallbackQuery handles inline keyboard button callbacks
+func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQuery) {
+	// Check authorization
+	if query.From.ID != b.authorizedUID {
+		log.Printf("Unauthorized callback query from user %d", query.From.ID)
+		b.api.Request(tgbotapi.NewCallback(query.ID, "❌ Unauthorized"))
+		return
+	}
+
+	// Parse callback data
+	data := query.Data
+	log.Printf("Received callback query: %s", data)
+
+	// Handle different callback types
+	if strings.HasPrefix(data, "switch:") {
+		// Extract session name
+		sessionName := strings.TrimPrefix(data, "switch:")
+
+		// Switch to the session
+		switchedSession, err := b.sessionManager.Switch(sessionName)
+		if err != nil {
+			b.api.Request(tgbotapi.NewCallback(query.ID, "❌ Failed to switch session"))
+			b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID,
+				fmt.Sprintf("Error: %v", err)))
+			return
+		}
+
+		// Update working directory
+		if switchedSession != nil {
+			b.workingDir = switchedSession.WorkingDir
+		}
+
+		// Acknowledge callback
+		b.api.Request(tgbotapi.NewCallback(query.ID, "✓ Switched to "+sessionName))
+
+		// Send confirmation message
+		b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID,
+			fmt.Sprintf("Switched to session: %s\nWorking directory: %s",
+				sessionName, b.workingDir)))
+
+	} else if data == "newsession" {
+		// Acknowledge callback
+		b.api.Request(tgbotapi.NewCallback(query.ID, ""))
+
+		// Send instruction message
+		b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID,
+			"To create a new session, use:\n/newsession <name> [description]"))
+	} else {
+		// Unknown callback
+		b.api.Request(tgbotapi.NewCallback(query.ID, "❌ Unknown action"))
+	}
+}
+
+// executeCommand executes a command by name (for keyboard buttons)
+func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command string, args string) {
+	switch command {
 	case "start":
 		reply := tgbotapi.NewMessage(msg.Chat.ID,
-			"Welcome to omnik - Claude Code on Telegram\n\n"+
+			"Welcome to Omnik - Claude Code on Telegram 🤖\n\n"+
 				"Send me any message and I'll forward it to Claude!\n\n"+
-				"File Navigation:\n"+
+				"📱 Use the keyboard buttons below for quick access to commands.\n\n"+
+				"**File Navigation:**\n"+
 				"/pwd - Show current working directory\n"+
 				"/ls - List files (ls -lah)\n"+
 				"/cd <path> - Change directory\n"+
 				"/cat <file> - Show file contents\n"+
 				"/exec <cmd> - Execute bash command\n\n"+
-				"Session Management:\n"+
+				"**Session Management:**\n"+
 				"/sessions - List all sessions\n"+
 				"/newsession <name> [description] - Create new session\n"+
 				"/switch <name> - Switch to session\n"+
 				"/delsession <name> - Delete session\n"+
 				"/status - Show current session status")
+		reply.ReplyMarkup = createMainKeyboard()
+		reply.ParseMode = "Markdown"
 		b.api.Send(reply)
 
 	case "status":
@@ -208,10 +289,11 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 			text.WriteString(fmt.Sprintf("   Last used: %s\n\n", s.LastUsedAt.Format("2006-01-02 15:04")))
 		}
 
-		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, text.String()))
+		reply := tgbotapi.NewMessage(msg.Chat.ID, text.String())
+		reply.ReplyMarkup = b.createSessionsInlineKeyboard(sessions)
+		b.api.Send(reply)
 
 	case "newsession":
-		args := strings.TrimSpace(msg.CommandArguments())
 		if args == "" {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /newsession <name> [description]"))
 			return
@@ -238,7 +320,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Created and switched to session: %s", name)))
 
 	case "switch":
-		args := strings.TrimSpace(msg.CommandArguments())
 		if args == "" {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /switch <name>"))
 			return
@@ -261,7 +342,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		)))
 
 	case "delsession":
-		args := strings.TrimSpace(msg.CommandArguments())
 		if args == "" {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /delsession <name>"))
 			return
@@ -282,7 +362,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		b.execDirectCommand(msg, "ls", "-lah", b.workingDir)
 
 	case "cd":
-		args := strings.TrimSpace(msg.CommandArguments())
 		if args == "" {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /cd <path>"))
 			return
@@ -317,7 +396,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Working directory changed to: %s", b.workingDir)))
 
 	case "cat":
-		args := strings.TrimSpace(msg.CommandArguments())
 		if args == "" {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /cat <filename>"))
 			return
@@ -331,7 +409,6 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		b.execDirectCommand(msg, "cat", filePath)
 
 	case "exec":
-		args := strings.TrimSpace(msg.CommandArguments())
 		if args == "" {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /exec <command>"))
 			return
@@ -342,6 +419,13 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		reply := tgbotapi.NewMessage(msg.Chat.ID, "Unknown command. Use /start for help.")
 		b.api.Send(reply)
 	}
+}
+
+// handleCommand handles bot commands (wrapper for executeCommand)
+func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
+	command := msg.Command()
+	args := strings.TrimSpace(msg.CommandArguments())
+	b.executeCommand(ctx, msg, command, args)
 }
 
 // execDirectCommand executes a command directly using os/exec
@@ -382,6 +466,73 @@ func (b *Bot) execDirectCommand(msg *tgbotapi.Message, command string, args ...s
 	b.api.Send(editMsg)
 }
 
+// formatToolUsage formats a tool use for display in Telegram
+func formatToolUsage(toolName string, toolInput map[string]interface{}) string {
+	// Map tools to emojis
+	emoji := "🔧"
+	switch toolName {
+	case "Read":
+		emoji = "📖"
+	case "Edit":
+		emoji = "✏️"
+	case "Write":
+		emoji = "📝"
+	case "Grep", "Glob":
+		emoji = "🔍"
+	case "Bash":
+		emoji = "🔨"
+	case "WebFetch", "WebSearch":
+		emoji = "🌐"
+	case "Task":
+		emoji = "🤖"
+	}
+
+	// Extract key parameter based on tool type
+	var detail string
+	switch toolName {
+	case "Read", "Edit", "Write":
+		if filePath, ok := toolInput["file_path"].(string); ok {
+			// Show just the filename, not the full path
+			parts := strings.Split(filePath, "/")
+			detail = parts[len(parts)-1]
+		}
+	case "Grep":
+		if pattern, ok := toolInput["pattern"].(string); ok {
+			detail = pattern
+			if len(detail) > 30 {
+				detail = detail[:30] + "..."
+			}
+		}
+	case "Glob":
+		if pattern, ok := toolInput["pattern"].(string); ok {
+			detail = pattern
+		}
+	case "Bash":
+		if command, ok := toolInput["command"].(string); ok {
+			detail = command
+			if len(detail) > 40 {
+				detail = detail[:40] + "..."
+			}
+		}
+	case "WebFetch":
+		if url, ok := toolInput["url"].(string); ok {
+			detail = url
+			if len(detail) > 40 {
+				detail = detail[:40] + "..."
+			}
+		}
+	case "Task":
+		if description, ok := toolInput["description"].(string); ok {
+			detail = description
+		}
+	}
+
+	if detail != "" {
+		return fmt.Sprintf("%s %s: %s", emoji, toolName, detail)
+	}
+	return fmt.Sprintf("%s %s", emoji, toolName)
+}
+
 // forwardToClaude forwards a message to Claude and streams the response
 func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 	log.Printf("→ Forwarding to Claude: %s", msg.Text)
@@ -412,7 +563,8 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 	responseChan, errorChan := b.claudeClient.Query(ctx, req)
 
 	var fullResponse strings.Builder
-	var lastEdit int
+	var currentTool string
+	var lastEdit time.Time
 	messageCount := 0
 
 	for {
@@ -461,15 +613,28 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 					}
 				}
 
-				// Extract text content from assistant messages
+				// Extract text and tool_use content from assistant messages
 				if msgType, ok := sdkMsg["type"].(string); ok && msgType == "assistant" {
 					if message, ok := sdkMsg["message"].(map[string]interface{}); ok {
 						if content, ok := message["content"].([]interface{}); ok {
 							for _, item := range content {
 								if contentItem, ok := item.(map[string]interface{}); ok {
-									if contentType, ok := contentItem["type"].(string); ok && contentType == "text" {
+									contentType, _ := contentItem["type"].(string)
+
+									// Extract text content
+									if contentType == "text" {
 										if text, ok := contentItem["text"].(string); ok {
 											fullResponse.WriteString(text)
+										}
+									}
+
+									// Extract tool usage
+									if contentType == "tool_use" {
+										toolName, _ := contentItem["name"].(string)
+										toolInput, _ := contentItem["input"].(map[string]interface{})
+										if toolName != "" {
+											currentTool = formatToolUsage(toolName, toolInput)
+											log.Printf("Tool usage: %s", currentTool)
 										}
 									}
 								}
@@ -478,25 +643,44 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 					}
 				}
 
-				// Update message every 2 seconds or every 10 messages
-				currentTime := msg.Date
-				if messageCount%10 == 0 || currentTime-lastEdit >= 2 {
-					if fullResponse.Len() > 0 {
+				// Update message with rate limiting (max once per 1.5 seconds to avoid Telegram limits)
+				now := time.Now()
+				shouldUpdate := messageCount%10 == 0 || time.Since(lastEdit) >= 1500*time.Millisecond
+
+				if shouldUpdate && (currentTool != "" || fullResponse.Len() > 0) {
+					var displayText string
+
+					// Build message with current tool and response
+					if currentTool != "" && fullResponse.Len() == 0 {
+						// Only tool, no text yet
+						displayText = currentTool
+					} else if currentTool != "" && fullResponse.Len() > 0 {
+						// Tool + accumulated text
+						text := fullResponse.String()
+						if len(text) > 3900 { // Leave room for tool header
+							text = text[:3900] + "\n\n... (truncated)"
+						}
+						displayText = currentTool + "\n\n" + text
+					} else {
+						// Only text, no tool
 						text := fullResponse.String()
 						if len(text) > 4000 {
 							text = text[:4000] + "\n\n... (truncated)"
 						}
+						displayText = text
+					}
 
-						editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, text)
+					if displayText != "" {
+						editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, displayText)
 						b.api.Send(editMsg)
-						lastEdit = currentTime
+						lastEdit = now
 					}
 				}
 
 			case "done":
 				log.Printf("← Received %d messages from Claude", messageCount)
 
-				// Final update
+				// Final update - show only the final text response (no tool info)
 				text := fullResponse.String()
 				if text == "" {
 					text = "✅ Done (no output)"
@@ -550,34 +734,84 @@ func cleanPath(path string) string {
 	return "/" + strings.Join(cleaned, "/")
 }
 
-// LoadConfigFromEnv loads configuration from environment variables
-func LoadConfigFromEnv() (Config, error) {
-	token := os.Getenv("TELEGRAM_BOT_TOKEN")
-	if token == "" {
-		return Config{}, fmt.Errorf("TELEGRAM_BOT_TOKEN not set")
+// createMainKeyboard creates the main reply keyboard with common commands
+func createMainKeyboard() tgbotapi.ReplyKeyboardMarkup {
+	return tgbotapi.NewReplyKeyboard(
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📂 Sessions"),
+			tgbotapi.NewKeyboardButton("📊 Status"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("📁 pwd"),
+			tgbotapi.NewKeyboardButton("📋 ls"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("ℹ️ Help"),
+		),
+	)
+}
+
+// createSessionsInlineKeyboard creates inline keyboard for session list
+func (b *Bot) createSessionsInlineKeyboard(sessions []*session.Session) tgbotapi.InlineKeyboardMarkup {
+	var rows [][]tgbotapi.InlineKeyboardButton
+
+	currentSession := b.sessionManager.Current()
+
+	// Add a button for each session
+	for _, s := range sessions {
+		// Skip current session (already active)
+		if currentSession != nil && s.Name == currentSession.Name {
+			continue
+		}
+
+		row := tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				"➡️ "+s.Name,
+				"switch:"+s.Name,
+			),
+		)
+		rows = append(rows, row)
 	}
 
-	uidStr := os.Getenv("AUTHORIZED_USER_ID")
+	// Add "New Session" button
+	rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+		tgbotapi.NewInlineKeyboardButtonData(
+			"➕ Create New Session",
+			"newsession",
+		),
+	))
+
+	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// LoadConfigFromEnv loads configuration from environment variables
+func LoadConfigFromEnv() (Config, error) {
+	token := os.Getenv("OMNI_TELEGRAM_BOT_TOKEN")
+	if token == "" {
+		return Config{}, fmt.Errorf("OMNI_TELEGRAM_BOT_TOKEN not set")
+	}
+
+	uidStr := os.Getenv("OMNI_AUTHORIZED_USER_ID")
 	if uidStr == "" {
-		return Config{}, fmt.Errorf("AUTHORIZED_USER_ID not set")
+		return Config{}, fmt.Errorf("OMNI_AUTHORIZED_USER_ID not set")
 	}
 
 	uid, err := strconv.ParseInt(uidStr, 10, 64)
 	if err != nil {
-		return Config{}, fmt.Errorf("invalid AUTHORIZED_USER_ID: %w", err)
+		return Config{}, fmt.Errorf("invalid OMNI_AUTHORIZED_USER_ID: %w", err)
 	}
 
 	// Check if using SDK mode
-	useSDK := os.Getenv("USE_CLAUDE_SDK") == "true"
+	useSDK := os.Getenv("OMNI_USE_CLAUDE_SDK") == "true"
 
 	// Model configuration
-	model := os.Getenv("CLAUDE_MODEL")
+	model := os.Getenv("OMNI_CLAUDE_MODEL")
 	if model == "" {
 		model = "sonnet" // Default to sonnet
 	}
 
-	// Bridge URL for HTTP mode
-	bridgeURL := os.Getenv("CLAUDE_BRIDGE_URL")
+	// Bridge URL for HTTP mode (legacy, not used in CLI mode)
+	bridgeURL := os.Getenv("OMNI_CLAUDE_BRIDGE_URL")
 	if bridgeURL == "" {
 		bridgeURL = "http://claude-bridge:9000"
 	}
