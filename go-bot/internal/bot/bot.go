@@ -562,8 +562,12 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 
 	responseChan, errorChan := b.claudeClient.Query(ctx, req)
 
-	var fullResponse strings.Builder
-	var currentTool string
+	// Track content as chronological events
+	type contentEvent struct {
+		eventType string // "text" or "tool"
+		content   string
+	}
+	var contentHistory []contentEvent
 	var lastEdit time.Time
 	messageCount := 0
 
@@ -624,7 +628,17 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 									// Extract text content
 									if contentType == "text" {
 										if text, ok := contentItem["text"].(string); ok {
-											fullResponse.WriteString(text)
+											// Append to last text event or create new one
+											if len(contentHistory) > 0 && contentHistory[len(contentHistory)-1].eventType == "text" {
+												// Append to existing text event
+												contentHistory[len(contentHistory)-1].content += text
+											} else {
+												// Create new text event
+												contentHistory = append(contentHistory, contentEvent{
+													eventType: "text",
+													content:   text,
+												})
+											}
 										}
 									}
 
@@ -633,8 +647,13 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 										toolName, _ := contentItem["name"].(string)
 										toolInput, _ := contentItem["input"].(map[string]interface{})
 										if toolName != "" {
-											currentTool = formatToolUsage(toolName, toolInput)
-											log.Printf("Tool usage: %s", currentTool)
+											toolStr := formatToolUsage(toolName, toolInput)
+											log.Printf("Tool usage: %s", toolStr)
+											// Always create new tool event
+											contentHistory = append(contentHistory, contentEvent{
+												eventType: "tool",
+												content:   toolStr,
+											})
 										}
 									}
 								}
@@ -647,27 +666,17 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 				now := time.Now()
 				shouldUpdate := messageCount%10 == 0 || time.Since(lastEdit) >= 1500*time.Millisecond
 
-				if shouldUpdate && (currentTool != "" || fullResponse.Len() > 0) {
-					var displayText string
+				if shouldUpdate && len(contentHistory) > 0 {
+					// Build chronological log from all events
+					var displayParts []string
+					for _, event := range contentHistory {
+						displayParts = append(displayParts, event.content)
+					}
+					displayText := strings.Join(displayParts, "\n\n")
 
-					// Build message with current tool and response
-					if currentTool != "" && fullResponse.Len() == 0 {
-						// Only tool, no text yet
-						displayText = currentTool
-					} else if currentTool != "" && fullResponse.Len() > 0 {
-						// Tool + accumulated text
-						text := fullResponse.String()
-						if len(text) > 3900 { // Leave room for tool header
-							text = text[:3900] + "\n\n... (truncated)"
-						}
-						displayText = currentTool + "\n\n" + text
-					} else {
-						// Only text, no tool
-						text := fullResponse.String()
-						if len(text) > 4000 {
-							text = text[:4000] + "\n\n... (truncated)"
-						}
-						displayText = text
+					// Truncate if too long
+					if len(displayText) > 4000 {
+						displayText = displayText[:4000] + "\n\n... (truncated)"
 					}
 
 					if displayText != "" {
@@ -680,16 +689,26 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 			case "done":
 				log.Printf("← Received %d messages from Claude", messageCount)
 
-				// Final update - show only the final text response (no tool info)
-				text := fullResponse.String()
-				if text == "" {
-					text = "✅ Done (no output)"
-				}
-				if len(text) > 4000 {
-					text = text[:4000] + "\n\n... (truncated)"
+				// Final update - show complete chronological log with all tools and text
+				if len(contentHistory) == 0 {
+					editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, "✅ Done (no output)")
+					b.api.Send(editMsg)
+					return
 				}
 
-				editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, text)
+				// Build final display from all events
+				var displayParts []string
+				for _, event := range contentHistory {
+					displayParts = append(displayParts, event.content)
+				}
+				displayText := strings.Join(displayParts, "\n\n")
+
+				// Truncate if too long
+				if len(displayText) > 4000 {
+					displayText = displayText[:4000] + "\n\n... (truncated)"
+				}
+
+				editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, displayText)
 				b.api.Send(editMsg)
 				return
 
