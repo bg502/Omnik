@@ -382,7 +382,7 @@ claude \
 ### Authentication
 
 **Whitelist-Based:**
-- Single `AUTHORIZED_USER_ID` environment variable
+- Single `OMNI_AUTHORIZED_USER_ID` environment variable
 - Bot checks every update against this ID
 - Unauthorized users receive no response
 - No rate limiting (single user only)
@@ -582,7 +582,7 @@ omnik/
 
 **Claude authentication failed:**
 - Re-run: `docker compose run --rm omnik claude setup-token`
-- Verify `ANTHROPIC_API_KEY` is set
+- Verify `OMNI_ANTHROPIC_API_KEY` is set
 
 **Session not persisting:**
 - Ensure `/workspace` volume exists

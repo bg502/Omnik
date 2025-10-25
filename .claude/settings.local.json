@@ -6,7 +6,10 @@
       "Bash(docker compose up:*)",
       "Bash(docker compose:*)",
       "WebSearch",
-      "Bash(docker stop:*)"
+      "Bash(docker stop:*)",
+      "WebFetch(domain:docs.github.com)",
+      "Bash(docker exec:*)",
+      "Bash(docker ps:*)"
     ],
     "deny": [],
     "ask": []

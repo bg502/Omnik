@@ -62,6 +62,11 @@ RUN mkdir -p /workspace /home/${USER}/.claude \
 # Copy Go binary from builder
 COPY --from=go-builder --chown=${USER}:${USER} /omnik-bot /app/omnik-bot
 
+# Copy git credential helper script and entrypoint
+COPY --chown=${USER}:${USER} git-credential-helper.sh /app/git-credential-helper.sh
+COPY --chown=${USER}:${USER} entrypoint.sh /app/entrypoint.sh
+RUN chmod +x /app/git-credential-helper.sh /app/entrypoint.sh
+
 # Configure Claude CLI
 RUN echo '{"installationType":"npm-global"}' > /home/${USER}/.claude/.installation-config.json \
  && chown ${USER}:${USER} /home/${USER}/.claude/.installation-config.json
@@ -70,12 +75,16 @@ RUN echo '{"installationType":"npm-global"}' > /home/${USER}/.claude/.installati
 USER ${USER}
 ENV HOME=/home/${USER}
 
+# Configure git to use credential helper and set user info from env vars
+RUN git config --global credential.helper "/app/git-credential-helper.sh" \
+ && git config --global credential.useHttpPath true
+
 # Health check
 HEALTHCHECK --interval=30s --timeout=10s --retries=3 \
     CMD pgrep -f omnik-bot || exit 1
 
-# Use tini as PID 1 for proper signal handling
-ENTRYPOINT ["/usr/bin/tini", "--"]
+# Use tini as PID 1 for proper signal handling, with entrypoint script
+ENTRYPOINT ["/usr/bin/tini", "--", "/app/entrypoint.sh"]
 
 # Start the Go bot (which will spawn Claude SDK as needed)
 CMD ["/app/omnik-bot"]

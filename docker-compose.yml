@@ -7,12 +7,15 @@ services:
     restart: unless-stopped
     user: "node"
     environment:
-      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
-      - AUTHORIZED_USER_ID=${AUTHORIZED_USER_ID}
-      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
-      - USE_CLAUDE_SDK=true
-      - CLAUDE_MODEL=sonnet
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      - OMNI_TELEGRAM_BOT_TOKEN=${OMNI_TELEGRAM_BOT_TOKEN}
+      - OMNI_AUTHORIZED_USER_ID=${OMNI_AUTHORIZED_USER_ID}
+      - OMNI_ANTHROPIC_API_KEY=${OMNI_ANTHROPIC_API_KEY}
+      - OMNI_USE_CLAUDE_SDK=true
+      - OMNI_CLAUDE_MODEL=sonnet
+      - OMNI_LOG_LEVEL=${OMNI_LOG_LEVEL:-INFO}
+      - GITHUB_TOKEN=${GITHUB_TOKEN:-}
+      - GIT_USER_NAME=${GIT_USER_NAME:-Omnik Bot}
+      - GIT_USER_EMAIL=${GIT_USER_EMAIL:-bot@omnik.local}
     volumes:
       - workspace:/workspace
       - claude-auth:/home/node/.claude

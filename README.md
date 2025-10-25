@@ -12,7 +12,8 @@ Omnik enables you to interact with Claude Code AI assistant directly from Telegr
 - 🗂️ **Session Management** - Create, switch between, and manage multiple independent coding sessions
 - 📂 **Workspace Persistence** - Each session remembers its working directory
 - 🔧 **Direct File Navigation** - Browse, read, and execute commands directly in the workspace
-- 🔒 **Secure** - Whitelist authentication, containerized execution
+- 🐙 **Git & Docker Integration** - Clone repos, run containers, full DevOps capabilities
+- 🔒 **Secure** - Whitelist authentication, containerized execution, token-based GitHub auth
 - ⚡ **Real-Time Streaming** - Watch Claude's responses stream in real-time
 
 ## Quick Start
@@ -36,10 +37,36 @@ Omnik enables you to interact with Claude Code AI assistant directly from Telegr
    ```bash
    cp .env.example .env
    # Edit .env and set:
-   # - TELEGRAM_BOT_TOKEN
-   # - AUTHORIZED_USER_ID
-   # - ANTHROPIC_API_KEY
+   # - OMNI_TELEGRAM_BOT_TOKEN
+   # - OMNI_AUTHORIZED_USER_ID
+   # - OMNI_ANTHROPIC_API_KEY
+   # - GITHUB_TOKEN (optional, for git operations)
+   # - GIT_USER_NAME (optional, for git commits)
+   # - GIT_USER_EMAIL (optional, for git commits)
    ```
+
+   **Optional: GitHub Authentication Setup**
+
+   If you want the bot to work with GitHub repositories:
+
+   a. Create a fine-grained Personal Access Token:
+      - Go to https://github.com/settings/tokens?type=beta
+      - Click "Generate new token"
+      - Set token name (e.g., "Omnik Bot")
+      - Set expiration (recommend 90 days or 1 year)
+      - Select repository access (specific repos or all repos)
+      - Grant permissions:
+        - **Contents**: Read and Write (for clone, pull, push)
+        - **Metadata**: Read (required, auto-selected)
+        - **Pull requests**: Read and Write (optional, for PR creation)
+      - Generate and copy the token
+
+   b. Add to `.env`:
+      ```
+      GITHUB_TOKEN=ghp_xxxxxxxxxxxxxxxxxxxxx
+      GIT_USER_NAME=Your Name
+      GIT_USER_EMAIL=your.email@example.com
+      ```
 
 3. **Authenticate Claude CLI** (one-time setup):
    ```bash
@@ -162,11 +189,14 @@ Environment variables (`.env`):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `TELEGRAM_BOT_TOKEN` | Telegram bot API token | Required |
-| `AUTHORIZED_USER_ID` | Your Telegram user ID | Required |
-| `ANTHROPIC_API_KEY` | Anthropic API key | Required |
-| `CLAUDE_MODEL` | Claude model to use | `sonnet` |
-| `LOG_LEVEL` | Logging verbosity | `INFO` |
+| `OMNI_TELEGRAM_BOT_TOKEN` | Telegram bot API token | Required |
+| `OMNI_AUTHORIZED_USER_ID` | Your Telegram user ID | Required |
+| `OMNI_ANTHROPIC_API_KEY` | Anthropic API key | Required |
+| `OMNI_CLAUDE_MODEL` | Claude model to use | `sonnet` |
+| `GITHUB_TOKEN` | GitHub fine-grained PAT | Optional |
+| `GIT_USER_NAME` | Git commit author name | Optional |
+| `GIT_USER_EMAIL` | Git commit author email | Optional |
+| `OMNI_LOG_LEVEL` | Logging verbosity | `INFO` |
 
 ## Development
 

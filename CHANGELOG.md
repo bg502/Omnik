@@ -2,6 +2,60 @@
 
 All notable changes to Omnik will be documented in this file.
 
+## [1.0.002] - 2025-10-25
+
+### 🔧 Breaking Changes
+
+**Environment Variable Renaming:**
+- All environment variables now use `OMNI_` prefix to prevent conflicts with other projects
+- **BREAKING:** You must update your `.env` file with new variable names
+
+**Variable Mapping:**
+- `TELEGRAM_BOT_TOKEN` → `OMNI_TELEGRAM_BOT_TOKEN`
+- `AUTHORIZED_USER_ID` → `OMNI_AUTHORIZED_USER_ID`
+- `ANTHROPIC_API_KEY` → `OMNI_ANTHROPIC_API_KEY`
+- `CLAUDE_MODEL` → `OMNI_CLAUDE_MODEL`
+- `LOG_LEVEL` → `OMNI_LOG_LEVEL`
+- `USE_CLAUDE_SDK` → `OMNI_USE_CLAUDE_SDK`
+- `CLAUDE_BRIDGE_URL` → `OMNI_CLAUDE_BRIDGE_URL` (legacy)
+
+**GitHub variables kept without prefix** (standard names):
+- `GITHUB_TOKEN` (unchanged)
+- `GIT_USER_NAME` (unchanged)
+- `GIT_USER_EMAIL` (unchanged)
+
+**Updated Files:**
+- `.env.example` - Updated all variable names
+- `docker-compose.yml` - Updated environment section
+- `go-bot/internal/bot/bot.go` - Updated env var reading
+- `entrypoint.sh` - Updated git configuration
+- `git-credential-helper.sh` - Updated GitHub token reference
+- Documentation (README.md, ARCHITECTURE.md)
+
+### Why This Change?
+
+When working with other projects (e.g., Eventswipe), environment variables with common names like `TELEGRAM_BOT_TOKEN` would be substituted when running `docker compose` commands, causing conflicts and unexpected behavior. The `OMNI_` prefix ensures Omnik's configuration remains isolated.
+
+### Migration Instructions
+
+**After updating code, update your `.env` file:**
+```bash
+# Rename Omnik-specific variables to use OMNI_ prefix
+sed -i 's/^TELEGRAM_BOT_TOKEN=/OMNI_TELEGRAM_BOT_TOKEN=/' .env
+sed -i 's/^AUTHORIZED_USER_ID=/OMNI_AUTHORIZED_USER_ID=/' .env
+sed -i 's/^ANTHROPIC_API_KEY=/OMNI_ANTHROPIC_API_KEY=/' .env
+sed -i 's/^CLAUDE_MODEL=/OMNI_CLAUDE_MODEL=/' .env
+sed -i 's/^LOG_LEVEL=/OMNI_LOG_LEVEL=/' .env
+
+# GitHub variables (GITHUB_TOKEN, GIT_USER_NAME, GIT_USER_EMAIL) remain unchanged
+
+# Rebuild and restart
+docker compose build omnik
+docker compose up -d omnik
+```
+
+---
+
 ## [1.0.001] - 2025-10-25
 
 ### 🔧 Enhancements
@@ -13,19 +67,36 @@ All notable changes to Omnik will be documented in this file.
 - Added `node` user to docker group for socket access
 - Mounted `/var/run/docker.sock` for Docker-in-Docker capabilities
 
+**GitHub Integration:**
+- Added GitHub authentication via fine-grained Personal Access Tokens
+- Automatic git credential management using environment variables
+- Custom git credential helper script (`/app/git-credential-helper.sh`)
+- Runtime git configuration via entrypoint script
+- Support for `GITHUB_TOKEN`, `GIT_USER_NAME`, `GIT_USER_EMAIL` env vars
+- Secure token handling (never stored in files, only in environment)
+
 **Security Updates:**
 - Removed `Bash(docker rm:*)` from auto-approved commands list
 - Maintained bypass permissions for safe development tools
+- Token-based GitHub authentication (no SSH keys required)
 - Git already included and updated in container
 
 **Documentation:**
 - Updated all references from `omnik-unified` to `omnik`
 - Updated architecture diagrams with Docker capabilities
+- Added comprehensive GitHub authentication setup guide
 - Simplified build and deployment commands
+- Added configuration table with new GitHub variables
 
 ### Technical Details
 
-This release enables Claude to work with Docker containers directly from within the bot, allowing for containerized development workflows while maintaining security through non-root execution via docker group membership.
+This release enables Claude to:
+- Work with Docker containers directly (build, run, compose)
+- Clone, pull, and push to GitHub repositories
+- Create commits and potentially pull requests
+- All within a secure containerized environment
+
+Authentication is handled via GitHub fine-grained Personal Access Tokens, allowing repository-specific access with granular permissions. The custom credential helper reads from environment variables, ensuring tokens are never persisted to disk.
 
 ---
 
