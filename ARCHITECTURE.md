@@ -25,7 +25,7 @@ Omnik uses a **unified container architecture** where all components run in a si
 
 ```
 ┌─────────────────────────────────────────────────┐
-│           Docker Container (omnik-unified)       │
+│           Docker Container (omnik)               │
 │                                                  │
 │  ┌────────────────────────────────────────┐    │
 │  │         Go Telegram Bot                │    │
@@ -43,6 +43,7 @@ Omnik uses a **unified container architecture** where all components run in a si
 │  │  - Stream JSON output                  │    │
 │  │  - Session resumption (--resume)       │    │
 │  │  - Tool execution (Bash, Read, etc.)   │    │
+│  │  - Docker & Git access                 │    │
 │  └────────────────────────────────────────┘    │
 │                                                  │
 │  ┌────────────────────────────────────────┐    │
@@ -50,6 +51,7 @@ Omnik uses a **unified container architecture** where all components run in a si
 │  │  /workspace - User files               │    │
 │  │  /home/node/.claude - Auth & sessions  │    │
 │  │  /workspace/.omnik-sessions.json       │    │
+│  │  /var/run/docker.sock (mounted)        │    │
 │  └────────────────────────────────────────┘    │
 │                                                  │
 └─────────────────────────────────────────────────┘
@@ -85,7 +87,7 @@ Omnik uses a **unified container architecture** where all components run in a si
 
 ### Multi-Stage Docker Build
 
-The `Dockerfile.unified` uses a two-stage build process:
+The `Dockerfile` uses a two-stage build process:
 
 #### Stage 1: Go Builder
 ```dockerfile
@@ -100,13 +102,15 @@ RUN go build -o /omnik-bot ./cmd/main.go
 #### Stage 2: Runtime
 ```dockerfile
 FROM node:20-bookworm-slim
+RUN apt-get update && apt-get install -y docker-ce-cli docker-compose-plugin git
 RUN npm install -g @anthropic-ai/claude-code
+RUN usermod -aG docker node
 COPY --from=go-builder /omnik-bot /app/omnik-bot
 USER node
 CMD ["/app/omnik-bot"]
 ```
 
-**Purpose**: Minimal runtime with Node.js for Claude CLI and the compiled Go binary.
+**Purpose**: Minimal runtime with Node.js, Docker tools, Git, and Claude CLI. The `node` user is added to the docker group for socket access.
 
 ### Why Unified Container?
 
@@ -504,7 +508,7 @@ omnik/
 │   │       └── manager.go       # Session management
 │   ├── go.mod                   # Go dependencies
 │   └── go.sum
-├── Dockerfile.unified           # Container build
+├── Dockerfile                   # Container build
 ├── docker-compose.yml           # Service definition
 ├── .env.example                 # Environment template
 ├── README.md                    # User documentation
@@ -522,7 +526,9 @@ omnik/
 
 **System Packages:**
 - `bash` - Command execution
-- `git` - Version control (optional for users)
+- `git` - Version control
+- `docker-ce-cli` - Docker command-line client
+- `docker-compose-plugin` - Docker Compose v2
 - `ca-certificates` - HTTPS support
 
 ---
@@ -572,10 +578,10 @@ omnik/
 **Bot not responding:**
 - Check container is running: `docker compose ps`
 - Verify environment variables in `.env`
-- Check logs: `docker compose logs -f omnik-unified`
+- Check logs: `docker compose logs -f omnik`
 
 **Claude authentication failed:**
-- Re-run: `docker compose run --rm omnik-unified claude setup-token`
+- Re-run: `docker compose run --rm omnik claude setup-token`
 - Verify `ANTHROPIC_API_KEY` is set
 
 **Session not persisting:**

@@ -2,6 +2,33 @@
 
 All notable changes to Omnik will be documented in this file.
 
+## [1.0.001] - 2025-10-25
+
+### 🔧 Enhancements
+
+**Container Improvements:**
+- Renamed `Dockerfile.unified` → `Dockerfile` (simplified naming)
+- Service name: `omnik-unified` → `omnik` across all files
+- Added Docker CLI and Docker Compose v2 to container
+- Added `node` user to docker group for socket access
+- Mounted `/var/run/docker.sock` for Docker-in-Docker capabilities
+
+**Security Updates:**
+- Removed `Bash(docker rm:*)` from auto-approved commands list
+- Maintained bypass permissions for safe development tools
+- Git already included and updated in container
+
+**Documentation:**
+- Updated all references from `omnik-unified` to `omnik`
+- Updated architecture diagrams with Docker capabilities
+- Simplified build and deployment commands
+
+### Technical Details
+
+This release enables Claude to work with Docker containers directly from within the bot, allowing for containerized development workflows while maintaining security through non-root execution via docker group membership.
+
+---
+
 ## [1.0.0] - 2025-10-25
 
 ### 🎉 Initial Release

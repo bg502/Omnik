@@ -1,9 +1,9 @@
 services:
-  omnik-unified:
+  omnik:
     build:
       context: .
-      dockerfile: Dockerfile.unified
-    container_name: omnik-unified
+      dockerfile: Dockerfile
+    container_name: omnik
     restart: unless-stopped
     user: "node"
     environment:
@@ -16,6 +16,7 @@ services:
     volumes:
       - workspace:/workspace
       - claude-auth:/home/node/.claude
+      - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - omnik-net
     deploy:

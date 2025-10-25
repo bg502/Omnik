@@ -23,7 +23,7 @@ FROM node:20-bookworm-slim
 ENV DEBIAN_FRONTEND=noninteractive
 SHELL ["/bin/bash", "-lc"]
 
-# Install system dependencies
+# Install system dependencies including Docker
 RUN apt-get update && apt-get install -y --no-install-recommends \
     ca-certificates \
     curl \
@@ -31,6 +31,17 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     tini \
     bash \
+    gnupg \
+    lsb-release \
+    && mkdir -p /etc/apt/keyrings \
+    && curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg \
+    && echo \
+      "deb [arch=$(dpkg --print-architecture) signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian \
+      $(lsb_release -cs) stable" | tee /etc/apt/sources.list.d/docker.list > /dev/null \
+    && apt-get update \
+    && apt-get install -y --no-install-recommends \
+      docker-ce-cli \
+      docker-compose-plugin \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Claude Code CLI globally
@@ -38,6 +49,10 @@ RUN npm install -g @anthropic-ai/claude-code
 
 # Use existing node user from base image (UID/GID 1000)
 ARG USER=node
+
+# Add node user to docker group (GID 999 is standard for docker group)
+RUN groupadd -g 999 docker || true \
+ && usermod -aG docker ${USER}
 
 # Set up directories
 WORKDIR /app

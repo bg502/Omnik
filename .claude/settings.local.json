@@ -6,8 +6,7 @@
       "Bash(docker compose up:*)",
       "Bash(docker compose:*)",
       "WebSearch",
-      "Bash(docker stop:*)",
-      "Bash(docker rm:*)"
+      "Bash(docker stop:*)"
     ],
     "deny": [],
     "ask": []

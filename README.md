@@ -43,8 +43,8 @@ Omnik enables you to interact with Claude Code AI assistant directly from Telegr
 
 3. **Authenticate Claude CLI** (one-time setup):
    ```bash
-   docker compose build omnik-unified
-   docker compose run --rm omnik-unified claude setup-token
+   docker compose build omnik
+   docker compose run --rm omnik claude setup-token
    # Follow the prompts to authenticate
    ```
 
@@ -55,7 +55,7 @@ Omnik enables you to interact with Claude Code AI assistant directly from Telegr
 
 5. **Verify it's running:**
    ```bash
-   docker compose logs -f omnik-unified
+   docker compose logs -f omnik
    ```
 
 ## Usage
@@ -124,7 +124,7 @@ Omnik runs as a unified Docker container combining:
              │
              ▼
      ┌───────────────────┐
-     │ omnik-unified     │
+     │      omnik        │
      │                   │
      │  ┌─────────────┐  │
      │  │   Go Bot    │  │
@@ -181,11 +181,10 @@ omnik/
 │       ├── bot/
 │       │   └── bot.go        # Telegram bot logic
 │       ├── claude/
-│       │   ├── cli.go        # Claude CLI client
-│       │   └── client.go     # HTTP client (legacy)
+│       │   └── cli.go        # Claude CLI client
 │       └── session/
 │           └── manager.go    # Session management
-├── Dockerfile.unified         # Production Dockerfile
+├── Dockerfile                 # Production Dockerfile
 ├── docker-compose.yml         # Service definition
 ├── .env.example              # Environment template
 └── README.md                 # This file
@@ -195,13 +194,13 @@ omnik/
 
 ```bash
 # Build the container
-docker compose build omnik-unified
+docker compose build omnik
 
 # Run in development mode
-docker compose up omnik-unified
+docker compose up omnik
 
 # View logs
-docker compose logs -f omnik-unified
+docker compose logs -f omnik
 ```
 
 ## Security
@@ -223,7 +222,7 @@ docker compose logs -f omnik-unified
 
 2. Check logs:
    ```bash
-   docker compose logs -f omnik-unified
+   docker compose logs -f omnik
    ```
 
 3. Verify environment variables in `.env`
@@ -232,7 +231,7 @@ docker compose logs -f omnik-unified
 
 Re-authenticate Claude:
 ```bash
-docker compose run --rm omnik-unified claude setup-token
+docker compose run --rm omnik claude setup-token
 ```
 
 ### Session not persisting
