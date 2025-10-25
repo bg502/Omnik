@@ -1,0 +1,39 @@
+services:
+  omnik:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: omnik
+    restart: unless-stopped
+    user: "node"
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - AUTHORIZED_USER_ID=${AUTHORIZED_USER_ID}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - USE_CLAUDE_SDK=true
+      - CLAUDE_MODEL=sonnet
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - workspace:/workspace
+      - claude-auth:/home/node/.claude
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - omnik-net
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+networks:
+  omnik-net:
+    driver: bridge
+
+volumes:
+  workspace:
+    driver: local
+  claude-auth:
+    driver: local

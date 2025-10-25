@@ -1,17 +1,19 @@
-# omnik
+# Omnik
 
-**Telegram-based conversational interface for Claude Code**
+**Telegram Bot for Claude Code - Mobile AI Coding Assistant**
 
-omnik enables developers to manage AI-powered coding sessions from anywhere using Telegram. The application runs as a containerized Python service that spawns and controls Claude Code subprocess sessions, providing a mobile-first development assistant with persistent conversation state, workspace isolation, and Docker integration.
+Omnik enables you to interact with Claude Code AI assistant directly from Telegram, allowing you to code, debug, and manage projects from anywhere using your phone or any Telegram client.
 
 ## Features
 
-- 🤖 **Claude Code Integration**: Full Claude Code session management through Telegram
-- 📱 **Mobile-First**: Code from anywhere using just your phone
-- 🔒 **Secure**: Whitelist authentication, isolated workspaces, containerized execution
-- 💾 **Persistent**: SQLite-backed conversation history and session state
-- 🚀 **Real-Time**: Live streaming of Claude Code output to Telegram
-- 🔄 **Multi-Session**: Support for multiple concurrent workspaces
+- 🤖 **Full Claude Code Integration** - Access Claude's AI coding capabilities via Telegram
+- 📱 **Mobile-First** - Code from your phone, tablet, or any device with Telegram
+- 💬 **Multi-Turn Conversations** - Maintain context across messages with full conversation history
+- 🗂️ **Session Management** - Create, switch between, and manage multiple independent coding sessions
+- 📂 **Workspace Persistence** - Each session remembers its working directory
+- 🔧 **Direct File Navigation** - Browse, read, and execute commands directly in the workspace
+- 🔒 **Secure** - Whitelist authentication, containerized execution
+- ⚡ **Real-Time Streaming** - Watch Claude's responses stream in real-time
 
 ## Quick Start
 
@@ -20,136 +22,151 @@ omnik enables developers to manage AI-powered coding sessions from anywhere usin
 - Docker and Docker Compose
 - Telegram Bot Token (get from [@BotFather](https://t.me/botfather))
 - Anthropic API Key (get from [Anthropic Console](https://console.anthropic.com/))
+- Your Telegram User ID (get from [@userinfobot](https://t.me/userinfobot))
 
 ### Installation
 
-1. Clone the repository:
-```bash
-git clone <repository-url>
-cd omnik
-```
+1. **Clone the repository:**
+   ```bash
+   git clone https://github.com/yourusername/omnik.git
+   cd omnik
+   ```
 
-2. Configure secrets:
-```bash
-# Create secrets directory
-mkdir -p secrets
+2. **Configure environment:**
+   ```bash
+   cp .env.example .env
+   # Edit .env and set:
+   # - TELEGRAM_BOT_TOKEN
+   # - AUTHORIZED_USER_ID
+   # - ANTHROPIC_API_KEY
+   ```
 
-# Add your Telegram bot token
-echo "TELEGRAM_BOT_TOKEN=your_token_here" > secrets/telegram_token.txt
-```
+3. **Authenticate Claude CLI** (one-time setup):
+   ```bash
+   docker compose build omnik
+   docker compose run --rm omnik claude setup-token
+   # Follow the prompts to authenticate
+   ```
 
-3. Set environment variables:
-```bash
-# Copy example environment file
-cp .env.example .env
+4. **Start the bot:**
+   ```bash
+   docker compose up -d
+   ```
 
-# Edit .env and set:
-# - AUTHORIZED_USER_ID (your Telegram user ID)
-# - ANTHROPIC_API_KEY (your Anthropic API key)
-vim .env
-```
-
-4. Build and start the service:
-```bash
-docker-compose up -d omnik
-```
-
-5. Check logs:
-```bash
-docker-compose logs -f omnik
-```
+5. **Verify it's running:**
+   ```bash
+   docker compose logs -f omnik
+   ```
 
 ## Usage
-
-### Getting Your Telegram User ID
-
-1. Message [@userinfobot](https://t.me/userinfobot) on Telegram
-2. It will reply with your user ID
-3. Set this in your `.env` file as `AUTHORIZED_USER_ID`
 
 ### Bot Commands
 
 **Session Management:**
-- `/start` - Initialize bot and see welcome message
-- `/new [name]` - Create new Claude Code session
-- `/list` - Show all your sessions
-- `/switch <id>` - Switch to a different session
-- `/kill` - Terminate active session
-- `/restart` - Restart Claude Code process
-
-**Session Info:**
+- `/sessions` - List all sessions
+- `/newsession <name> [description]` - Create a new session
+- `/switch <name>` - Switch to a different session
+- `/delsession <name>` - Delete a session
 - `/status` - Show current session details
-- `/pwd` - Show current working directory
-- `/ls [path]` - List files in workspace
 
-**Interaction:**
-- Send any message to chat with Claude Code
-- Upload files to add them to your workspace
+**File Navigation:**
+- `/pwd` - Show current working directory
+- `/ls` - List files in current directory
+- `/cd <path>` - Change directory (saved per session!)
+- `/cat <file>` - View file contents
+- `/exec <command>` - Execute bash command
+
+**Help:**
+- `/start` - Show welcome message and commands
 
 ### Example Workflow
 
 ```
-User: /new my-project
-Bot:  ✅ Created session abc12345
-      Name: my-project
-      Send a message to start coding!
+You: /newsession myproject Building a web scraper
+Bot: Created and switched to session: myproject
 
-User: Create a Python hello world script
-Bot:  🤔 Processing...
-      [Claude Code responds with code and creates file]
+You: Hi! Can you help me create a Python web scraper?
+Claude: Hi! Yes, I can help you create a Python web scraper...
 
-User: /ls
-Bot:  📁 ./
-      📄 hello.py (85 bytes)
+You: Let's use BeautifulSoup to scrape news headlines
+Claude: [Creates scraper.py with BeautifulSoup code]
 
-User: Run the script
-Bot:  [Claude Code executes and shows output]
+You: /ls
+Bot: total 8K
+     -rw-r--r-- 1 node node 1.2K scraper.py
+
+You: /newsession backend Working on API
+Bot: Created and switched to session: backend
+
+You: Create a FastAPI hello world
+Claude: [Creates FastAPI app]
+
+You: /switch myproject
+Bot: Switched to session: myproject
+     Working directory: /workspace
+
+# Your scraper code is still there!
+You: Can you add error handling to the scraper?
+Claude: [Continues the conversation from before]
 ```
 
 ## Architecture
+
+Omnik runs as a unified Docker container combining:
+- **Go Telegram Bot** - Handles Telegram API, commands, and session management
+- **Claude CLI** - Official Claude Code CLI for AI interactions
+- **Shared Filesystem** - `/workspace` volume for persistent file storage
 
 ```
 ┌─────────────────────────────────┐
 │     Telegram Platform           │
 └────────────┬────────────────────┘
-             │ HTTPS
+             │
              ▼
      ┌───────────────────┐
-     │   omnik Container │
+     │      omnik        │
      │                   │
      │  ┌─────────────┐  │
-     │  │  Bot Mgr    │  │
+     │  │   Go Bot    │  │
+     │  │  (Telegram) │  │
      │  └──────┬──────┘  │
      │         │         │
      │  ┌──────▼──────┐  │
-     │  │ Session Mgr │  │
-     │  │  Claude Code│  │
-     │  └─────────────┘  │
+     │  │  Session    │  │
+     │  │  Manager    │  │
+     │  └──────┬──────┘  │
      │         │         │
      │  ┌──────▼──────┐  │
-     │  │  SQLite DB  │  │
-     │  └─────────────┘  │
-     └─────────┬─────────┘
-               │
-               ▼
-     ┌─────────────────┐
-     │ Workspace Volume│
-     └─────────────────┘
+     │  │ Claude CLI  │  │
+     │  │    (AI)     │  │
+     │  └──────┬──────┘  │
+     │         │         │
+     │    /workspace     │
+     │                   │
+     └───────────────────┘
 ```
+
+### Session Persistence
+
+- Sessions are stored in `/workspace/.omnik-sessions.json`
+- Each session maintains:
+  - Name and description
+  - Claude conversation ID
+  - Current working directory
+  - Creation and last-used timestamps
+- Working directory persists when you switch sessions
 
 ## Configuration
 
-Environment variables can be set in `.env`:
+Environment variables (`.env`):
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `AUTHORIZED_USER_ID` | Your Telegram user ID | None (required) |
-| `ANTHROPIC_API_KEY` | Anthropic API key | None (required) |
-| `LOG_LEVEL` | Logging level | INFO |
-| `MAX_SESSIONS` | Max concurrent sessions | 10 |
-| `SESSION_TIMEOUT_HOURS` | Session timeout | 24 |
-| `WORKSPACE_BASE` | Workspace directory | /workspace |
-| `RATE_LIMIT_REQUESTS` | Rate limit per minute | 60 |
+| `TELEGRAM_BOT_TOKEN` | Telegram bot API token | Required |
+| `AUTHORIZED_USER_ID` | Your Telegram user ID | Required |
+| `ANTHROPIC_API_KEY` | Anthropic API key | Required |
+| `CLAUDE_MODEL` | Claude model to use | `sonnet` |
+| `LOG_LEVEL` | Logging verbosity | `INFO` |
 
 ## Development
 
@@ -157,99 +174,88 @@ Environment variables can be set in `.env`:
 
 ```
 omnik/
-├── src/
-│   ├── bot/
-│   │   ├── handlers.py        # Telegram command handlers
-│   │   └── session_manager.py # Claude Code subprocess management
-│   ├── database/
-│   │   ├── manager.py         # Database CRUD operations
-│   │   └── schema.py          # SQLAlchemy models
-│   ├── models/
-│   │   ├── session.py         # Session Pydantic model
-│   │   ├── message.py         # Message Pydantic model
-│   │   └── audit.py           # Audit log Pydantic model
-│   ├── utils/
-│   │   ├── config.py          # Configuration management
-│   │   └── logging.py         # Logging setup
-│   └── main.py                # Application entry point
-├── Dockerfile                 # Container definition
-├── docker-compose.yml         # Service orchestration
-└── requirements.txt           # Python dependencies
+├── go-bot/                    # Main application
+│   ├── cmd/
+│   │   └── main.go           # Application entry point
+│   └── internal/
+│       ├── bot/
+│       │   └── bot.go        # Telegram bot logic
+│       ├── claude/
+│       │   └── cli.go        # Claude CLI client
+│       └── session/
+│           └── manager.go    # Session management
+├── Dockerfile                 # Production Dockerfile
+├── docker-compose.yml         # Service definition
+├── .env.example              # Environment template
+└── README.md                 # This file
 ```
 
-### Running Locally
+### Building Locally
 
 ```bash
-# Install dependencies
-pip install -r requirements.txt
+# Build the container
+docker compose build omnik
 
-# Set environment variables
-export TELEGRAM_BOT_TOKEN="your_token"
-export ANTHROPIC_API_KEY="your_key"
-export AUTHORIZED_USER_ID="your_id"
+# Run in development mode
+docker compose up omnik
 
-# Run the bot
-python -m src.main
+# View logs
+docker compose logs -f omnik
 ```
 
 ## Security
 
-- **Authentication**: Whitelist-based, only configured Telegram user ID can interact
-- **Isolation**: Each session runs in isolated workspace directory
-- **Container Security**: Non-root user, read-only filesystem, dropped capabilities
-- **Audit Logging**: All commands and file operations logged
-- **No Docker Socket**: Claude Code runs as subprocess, not separate container
+- **Whitelist Authentication** - Only configured Telegram user ID can interact
+- **Containerized Execution** - All code runs in isolated Docker container
+- **No Sudo/Root** - Bot runs as non-privileged `node` user
+- **Workspace Isolation** - Each session can have its own workspace directory
+- **Permission Control** - Claude runs with `bypassPermissions` mode for autonomous operation within the secure sandbox
 
 ## Troubleshooting
 
 ### Bot not responding
 
-1. Check if container is running: `docker-compose ps`
-2. Check logs: `docker-compose logs -f omnik`
-3. Verify Telegram token is correct
-4. Ensure your user ID is authorized
+1. Check if container is running:
+   ```bash
+   docker compose ps
+   ```
 
-### Claude Code not starting
+2. Check logs:
+   ```bash
+   docker compose logs -f omnik
+   ```
 
-1. Check Anthropic API key is set correctly
-2. Verify Claude Code is installed in container
-3. Check workspace permissions
-4. Review session logs in database
+3. Verify environment variables in `.env`
 
-### Database errors
+### Claude authentication issues
 
-1. Ensure `/data` directory is writable
-2. Check SQLite database file permissions
-3. Try deleting database and restarting (will lose history)
+Re-authenticate Claude:
+```bash
+docker compose run --rm omnik claude setup-token
+```
 
-## Roadmap
+### Session not persisting
 
-See [PRD.md](PRD.md) for detailed product requirements and roadmap.
-
-**Milestone 1** (Current): Core infrastructure, basic bot commands
-**Milestone 2**: Claude Code integration, session management
-**Milestone 3**: Session persistence, message history
-**Milestone 4**: File operations, multiple sessions
-**Milestone 5**: Production hardening, security, documentation
+- Ensure `/workspace` volume exists and is writable
+- Check logs for session manager errors
+- Sessions are stored in `/workspace/.omnik-sessions.json`
 
 ## Contributing
 
-Contributions welcome! Please:
+Contributions are welcome! Please:
 
 1. Fork the repository
-2. Create a feature branch
-3. Make your changes
-4. Add tests if applicable
-5. Submit a pull request
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## License
 
-[License information here]
+[MIT License](LICENSE)
 
 ## Acknowledgments
 
-Built with:
-- [python-telegram-bot](https://github.com/python-telegram-bot/python-telegram-bot)
-- [Claude Code](https://github.com/anthropics/claude-code)
-- [Pydantic](https://github.com/pydantic/pydantic)
-- [SQLAlchemy](https://www.sqlalchemy.org/)
+- [Claude Code](https://github.com/anthropics/claude-code) - AI coding assistant
+- [go-telegram-bot-api](https://github.com/go-telegram-bot-api/telegram-bot-api) - Telegram Bot API for Go
+- Built with ❤️ for developers who code on the go
