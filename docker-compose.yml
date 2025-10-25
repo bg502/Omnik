@@ -1,0 +1,232 @@
+services:
+  # OLD PYTHON BOT - DISABLED (replaced by omnik-go-bot)
+  # omnik:
+  #   build:
+  #     context: .
+  #     dockerfile: Dockerfile
+  #     args:
+  #       - UID=1000
+  #       - GID=1000
+  #   container_name: omnik
+  #   init: true
+  #   restart: unless-stopped
+  #   user: "1000:1000"
+  #   environment:
+  #     - PYTHONUNBUFFERED=1
+  #     - TELEGRAM_BOT_TOKEN_FILE=/run/secrets/telegram_bot_token
+  #     - LOG_LEVEL=${LOG_LEVEL:-INFO}
+  #     - AUTHORIZED_USER_ID=${AUTHORIZED_USER_ID:-}
+  #     - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY:-}
+  #   volumes:
+  #     - workspace:/workspace
+  #     - ./logs:/app/logs
+  #     - omnik-data:/app/data
+  #     - ./secrets/telegram_token.txt:/run/secrets/telegram_bot_token:ro
+  #     - claude-auth:/home/appuser/.claude
+  #   networks:
+  #     - omnik-net
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '2.0'
+  #         memory: 4G
+  #       reservations:
+  #         cpus: '0.5'
+  #         memory: 512M
+
+  # UNIFIED BOT - Go + Node.js + Claude SDK in one container
+  omnik-unified:
+    build:
+      context: .
+      dockerfile: Dockerfile.unified
+    container_name: omnik-unified
+    restart: unless-stopped
+    user: "node"
+    environment:
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+      - AUTHORIZED_USER_ID=${AUTHORIZED_USER_ID}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - USE_CLAUDE_SDK=true
+      - CLAUDE_MODEL=sonnet
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+    volumes:
+      - workspace:/workspace
+      - claude-auth:/home/node/.claude
+    networks:
+      - omnik-net
+    deploy:
+      resources:
+        limits:
+          cpus: '2.0'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 256M
+
+  # LEGACY - Go bot with HTTP bridge (disabled by default)
+  # omnik-go-bot:
+  #   build:
+  #     context: ./go-bot
+  #     dockerfile: Dockerfile
+  #   container_name: omnik-go-bot
+  #   restart: unless-stopped
+  #   user: "appuser"
+  #   environment:
+  #     - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN}
+  #     - AUTHORIZED_USER_ID=${AUTHORIZED_USER_ID}
+  #     - CLAUDE_BRIDGE_URL=http://claude-bridge:9000
+  #     - LOG_LEVEL=${LOG_LEVEL:-INFO}
+  #   volumes:
+  #     - workspace:/workspace
+  #   networks:
+  #     - omnik-net
+  #   depends_on:
+  #     - claude-bridge
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '1.0'
+  #         memory: 512M
+  #       reservations:
+  #         cpus: '0.25'
+  #         memory: 128M
+
+  # LEGACY - Node.js Claude Bridge (disabled by default, only needed for HTTP mode)
+  # claude-bridge:
+  #   build:
+  #     context: ./node-bridge
+  #     dockerfile: Dockerfile
+  #   container_name: claude-bridge
+  #   restart: unless-stopped
+  #   user: "node"
+  #   environment:
+  #     - PORT=9000
+  #     - HOST=0.0.0.0
+  #   volumes:
+  #     - workspace:/workspace
+  #     - claude-auth:/home/node/.claude
+  #   networks:
+  #     - omnik-net
+  #   healthcheck:
+  #     test: ["CMD", "node", "-e", "require('http').get('http://localhost:9000/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1); }).on('error', () => process.exit(1));"]
+  #     interval: 30s
+  #     timeout: 10s
+  #     retries: 3
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '1.0'
+  #         memory: 1G
+  #       reservations:
+  #         cpus: '0.25'
+  #         memory: 256M
+
+  code-agent:
+    build:
+      context: ./agent
+      dockerfile: Dockerfile
+    container_name: agent
+    networks:
+      - agent-network
+      - proxy
+    volumes:
+      - .mcp.json:/home/agent/.mcp.json:ro
+      - agent-home:/home/agent/.config
+      - /var/run/docker.sock:/var/run/docker.sock
+    environment:
+      - CLAUDE_TELEMETRY_OPTOUT=1
+    tty: true
+    stdin_open: true
+    command: ["bash","-lc","sleep infinity"]
+    restart: unless-stopped
+
+
+
+
+
+
+
+
+
+
+# n8n:
+#    build:
+#      context: .
+#      dockerfile: Dockerfile.n8n-docker
+#    user: "0:0"
+#    restart: unless-stopped
+#    expose:
+#      - 305678:5678
+#    environment:
+#      - VIRTUAL_HOST=${SUBDOMAIN}.${DOMAIN_NAME}
+#      - VIRTUAL_PORT=5678
+#
+#      - LETSENCRYPT_HOST=${SUBDOMAIN}.${DOMAIN_NAME}
+#      - LETSENCRYPT_EMAIL=${SSL_EMAIL}
+#      - N8N_EDITOR_BASE_URL=https://${SUBDOMAIN}.${DOMAIN_NAME}
+#      - WEBHOOK_URL=https://${SUBDOMAIN}.${DOMAIN_NAME}/
+#      - N8N_USER_FOLDER=/home/node/.n8n
+#      - N8N_PROXY_HOPS=1
+#      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+#      - N8N_HOST=${SUBDOMAIN}.${DOMAIN_NAME}
+#      - N8N_PORT=5678
+#      - N8N_PROTOCOL=https
+#      - N8N_RUNNERS_ENABLED=true
+#      - NODE_ENV=production
+#      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+#      - TZ=${GENERIC_TIMEZONE}
+#    volumes:
+#      - n8n_data:/home/node/.n8n
+#      - n8n_data:/root/.n8n
+#      - ./local-files:/files
+#      - /var/run/docker.sock:/var/run/docker.sock
+#    networks:
+#      - proxy
+#      - agent-network 
+#
+#
+#  n8n-mcp:
+#    image: ghcr.io/czlonkowski/n8n-mcp:latest
+#    container_name: n8n-mcp
+#    environment:
+#      - MCP_MODE=sse
+#      - LOG_LEVEL=debug
+#      - DISABLE_CONSOLE_OUTPUT=true
+#      - N8N_API_URL=${N8N_API_URL}
+#      - N8N_API_KEY=${N8N_API_KEY}
+#      - PORT=3000
+#    expose:
+#      - 30000:3000
+#    networks:
+#      - agent-network
+#    restart: unless-stopped
+
+
+
+
+
+
+
+
+
+
+
+
+
+networks:
+  omnik-net:
+    driver: bridge
+  agent-network:
+    driver: bridge
+  proxy:
+    external: true
+
+volumes:
+  workspace:
+    driver: local
+  omnik-data:
+    driver: local
+  claude-auth:
+    driver: local
+  agent-home:
+  n8n-home:

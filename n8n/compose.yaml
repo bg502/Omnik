@@ -1,0 +1,48 @@
+services:
+  n8n:
+    build:
+      context: .
+      dockerfile: Dockerfile.n8n-docker
+    user: "0:0"
+    restart: always
+    expose:
+      - "5678"
+    environment:
+      - VIRTUAL_HOST=${SUBDOMAIN}.${DOMAIN_NAME}
+      - VIRTUAL_PORT=5678
+      - LETSENCRYPT_HOST=${SUBDOMAIN}.${DOMAIN_NAME}
+      - LETSENCRYPT_EMAIL=${SSL_EMAIL}
+
+      - N8N_EDITOR_BASE_URL=https://${SUBDOMAIN}.${DOMAIN_NAME}
+      - WEBHOOK_URL=https://${SUBDOMAIN}.${DOMAIN_NAME}/
+      - N8N_USER_FOLDER=/home/node/.n8n
+      - N8N_PROXY_HOPS=1
+      - N8N_ENFORCE_SETTINGS_FILE_PERMISSIONS=true
+      - N8N_HOST=${SUBDOMAIN}.${DOMAIN_NAME}
+      - N8N_PORT=5678
+      - N8N_PROTOCOL=https
+      - N8N_RUNNERS_ENABLED=true
+      - NODE_ENV=production
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - TZ=${GENERIC_TIMEZONE}
+    volumes:
+      - /home/drew/workdir/omni-claude/workspace:/workspace
+      - n8n_data:/home/node/.n8n
+      - n8n_data:/root/.n8n
+      - ./local-files:/files
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - proxy
+      - archon_app-network
+      - eventswipe_network
+
+volumes:
+  n8n_data:
+
+networks:
+  proxy:
+    external: true
+  archon_app-network:
+    external: true
+  eventswipe_network:
+    external: true
