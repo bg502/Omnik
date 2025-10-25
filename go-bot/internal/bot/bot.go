@@ -533,6 +533,53 @@ func formatToolUsage(toolName string, toolInput map[string]interface{}) string {
 	return fmt.Sprintf("%s %s", emoji, toolName)
 }
 
+// updateOrSplitMessage updates the current message, splitting into new message if needed
+// sentCharCount tracks how many characters have been finalized in previous messages
+// Returns the new message ID to edit (same if no split, new if split occurred)
+func (b *Bot) updateOrSplitMessage(chatID int64, currentMsgID int, fullText string, sentCharCount *int, partNum *int) int {
+	const maxLen = 4000
+
+	// Calculate unsent portion (what hasn't been finalized in previous messages yet)
+	if *sentCharCount >= len(fullText) {
+		// Everything already sent, nothing to update
+		return currentMsgID
+	}
+
+	unsentText := fullText[*sentCharCount:]
+
+	if len(unsentText) <= maxLen {
+		// Current message can hold all unsent content - just update it
+		editMsg := tgbotapi.NewEditMessageText(chatID, currentMsgID, unsentText)
+		b.api.Send(editMsg)
+		return currentMsgID
+	}
+
+	// Unsent content > 4000, need to split
+	// Finalize current message with first 4000 chars of unsent portion
+	currentPortionText := unsentText[:maxLen]
+
+	// Finalize current message with continuation indicator
+	editMsg := tgbotapi.NewEditMessageText(chatID, currentMsgID, currentPortionText+"\n\n... (continued)")
+	b.api.Send(editMsg)
+
+	// Update sent count - we've now committed these chars to a finalized message
+	*sentCharCount += maxLen
+
+	// Calculate remaining unsent text after this split
+	remainingText := fullText[*sentCharCount:]
+
+	// Send new message for remaining content
+	*partNum++
+	continueMsg := tgbotapi.NewMessage(chatID, fmt.Sprintf("(part %d)\n\n%s", *partNum, remainingText))
+	sentMsg, err := b.api.Send(continueMsg)
+	if err != nil {
+		log.Printf("Failed to send continuation message: %v", err)
+		return currentMsgID // Fall back to current message
+	}
+
+	return sentMsg.MessageID
+}
+
 // forwardToClaude forwards a message to Claude and streams the response
 func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 	log.Printf("→ Forwarding to Claude: %s", msg.Text)
@@ -570,6 +617,9 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 	var contentHistory []contentEvent
 	var lastEdit time.Time
 	messageCount := 0
+	currentMessageID := sentMsg.MessageID // Track which message we're editing
+	messagePartNum := 1                    // Which part/continuation we're on
+	sentCharCount := 0                     // How many chars finalized in previous messages
 
 	for {
 		select {
@@ -662,9 +712,9 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 					}
 				}
 
-				// Update message with rate limiting (max once per 1.5 seconds to avoid Telegram limits)
+				// Update message with rate limiting (updates more frequently for real-time feel)
 				now := time.Now()
-				shouldUpdate := messageCount%10 == 0 || time.Since(lastEdit) >= 1500*time.Millisecond
+				shouldUpdate := messageCount%3 == 0 || time.Since(lastEdit) >= 1000*time.Millisecond
 
 				if shouldUpdate && len(contentHistory) > 0 {
 					// Build chronological log from all events
@@ -674,14 +724,9 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 					}
 					displayText := strings.Join(displayParts, "\n\n")
 
-					// Truncate if too long
-					if len(displayText) > 4000 {
-						displayText = displayText[:4000] + "\n\n... (truncated)"
-					}
-
 					if displayText != "" {
-						editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, displayText)
-						b.api.Send(editMsg)
+						// Update message, splitting if necessary
+						currentMessageID = b.updateOrSplitMessage(msg.Chat.ID, currentMessageID, displayText, &sentCharCount, &messagePartNum)
 						lastEdit = now
 					}
 				}
@@ -691,7 +736,7 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 
 				// Final update - show complete chronological log with all tools and text
 				if len(contentHistory) == 0 {
-					editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, "✅ Done (no output)")
+					editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, currentMessageID, "✅ Done (no output)")
 					b.api.Send(editMsg)
 					return
 				}
@@ -703,13 +748,8 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 				}
 				displayText := strings.Join(displayParts, "\n\n")
 
-				// Truncate if too long
-				if len(displayText) > 4000 {
-					displayText = displayText[:4000] + "\n\n... (truncated)"
-				}
-
-				editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, displayText)
-				b.api.Send(editMsg)
+				// Update message, splitting if necessary
+				b.updateOrSplitMessage(msg.Chat.ID, currentMessageID, displayText, &sentCharCount, &messagePartNum)
 				return
 
 			case "error":
