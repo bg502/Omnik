@@ -543,8 +543,8 @@ func formatToolUsage(toolName string, toolInput map[string]interface{}) string {
 	case "Bash":
 		if command, ok := toolInput["command"].(string); ok {
 			detail = command
-			if len(detail) > 40 {
-				detail = detail[:40] + "..."
+			if len(detail) > 150 {
+				detail = detail[:150] + "..."
 			}
 		}
 	case "WebFetch":
