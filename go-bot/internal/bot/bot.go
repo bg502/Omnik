@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
@@ -24,6 +25,8 @@ type Bot struct {
 	sessionManager *session.Manager
 	authorizedUID  int64
 	workingDir     string // Current working directory for debugging
+	stopChannels   map[int64]chan struct{} // Track stop signals for active queries
+	stopMutex      sync.Mutex              // Protect stopChannels map
 }
 
 // Config holds bot configuration
@@ -90,6 +93,7 @@ func New(cfg Config) (*Bot, error) {
 		sessionManager: sessionManager,
 		authorizedUID:  cfg.AuthorizedUID,
 		workingDir:     workingDir,
+		stopChannels:   make(map[int64]chan struct{}),
 	}, nil
 }
 
@@ -210,6 +214,23 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQ
 		// Send instruction message
 		b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID,
 			"To create a new session, use:\n/newsession <name> [description]"))
+
+	} else if data == "stop" {
+		// Acknowledge callback
+		b.api.Request(tgbotapi.NewCallback(query.ID, "⏹️ Stopping..."))
+
+		// Send stop signal
+		b.stopMutex.Lock()
+		stopChan, exists := b.stopChannels[query.Message.Chat.ID]
+		b.stopMutex.Unlock()
+
+		if exists {
+			close(stopChan) // Signal to stop
+			log.Printf("Sent stop signal for chat %d", query.Message.Chat.ID)
+		} else {
+			log.Printf("No active query found for chat %d", query.Message.Chat.ID)
+		}
+
 	} else {
 		// Unknown callback
 		b.api.Request(tgbotapi.NewCallback(query.ID, "❌ Unknown action"))
@@ -533,6 +554,16 @@ func formatToolUsage(toolName string, toolInput map[string]interface{}) string {
 	return fmt.Sprintf("%s %s", emoji, toolName)
 }
 
+// createStopButtonMarkup creates the inline keyboard with stop button
+func createStopButtonMarkup() *tgbotapi.InlineKeyboardMarkup {
+	markup := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⏹️ Stop", "stop"),
+		),
+	)
+	return &markup
+}
+
 // updateOrSplitMessage updates the current message, splitting into new message if needed
 // sentCharCount tracks how many characters have been finalized in previous messages
 // Returns the new message ID to edit (same if no split, new if split occurred)
@@ -550,6 +581,7 @@ func (b *Bot) updateOrSplitMessage(chatID int64, currentMsgID int, fullText stri
 	if len(unsentText) <= maxLen {
 		// Current message can hold all unsent content - just update it
 		editMsg := tgbotapi.NewEditMessageText(chatID, currentMsgID, unsentText)
+		editMsg.ReplyMarkup = createStopButtonMarkup() // Keep stop button visible
 		b.api.Send(editMsg)
 		return currentMsgID
 	}
@@ -558,8 +590,9 @@ func (b *Bot) updateOrSplitMessage(chatID int64, currentMsgID int, fullText stri
 	// Finalize current message with first 4000 chars of unsent portion
 	currentPortionText := unsentText[:maxLen]
 
-	// Finalize current message with continuation indicator
+	// Finalize current message with continuation indicator (remove stop button as this message is done)
 	editMsg := tgbotapi.NewEditMessageText(chatID, currentMsgID, currentPortionText+"\n\n... (continued)")
+	editMsg.ReplyMarkup = nil // Remove stop button from finalized message
 	b.api.Send(editMsg)
 
 	// Update sent count - we've now committed these chars to a finalized message
@@ -591,8 +624,14 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	// Send "thinking" message
+	// Send "thinking" message with stop button
+	stopButton := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⏹️ Stop", "stop"),
+		),
+	)
 	thinkingMsg := tgbotapi.NewMessage(msg.Chat.ID, "🤔 Processing...")
+	thinkingMsg.ReplyMarkup = stopButton
 	sentMsg, err := b.api.Send(thinkingMsg)
 	if err != nil {
 		log.Printf("Failed to send thinking message: %v", err)
@@ -607,7 +646,23 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 		PermissionMode: "bypassPermissions", // Skip all permission prompts
 	}
 
-	responseChan, errorChan := b.claudeClient.Query(ctx, req)
+	// Create cancellable context for this query
+	queryCtx, cancelQuery := context.WithCancel(ctx)
+	defer cancelQuery()
+
+	// Create and register stop channel
+	stopChan := make(chan struct{})
+	b.stopMutex.Lock()
+	b.stopChannels[msg.Chat.ID] = stopChan
+	b.stopMutex.Unlock()
+
+	defer func() {
+		b.stopMutex.Lock()
+		delete(b.stopChannels, msg.Chat.ID)
+		b.stopMutex.Unlock()
+	}()
+
+	responseChan, errorChan := b.claudeClient.Query(queryCtx, req)
 
 	// Track content as chronological events
 	type contentEvent struct {
@@ -623,14 +678,25 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 
 	for {
 		select {
+		case <-stopChan:
+			log.Printf("Stop requested by user")
+			// Cancel the query
+			cancelQuery()
+			// Update message to show stopped status and remove stop button
+			editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, currentMessageID, "⏹️ Stopped by user")
+			editMsg.ReplyMarkup = nil // Remove stop button
+			b.api.Send(editMsg)
+			return
+
 		case err := <-errorChan:
 			if err != nil {
 				log.Printf("Claude query error: %v", err)
 				editMsg := tgbotapi.NewEditMessageText(
 					msg.Chat.ID,
-					sentMsg.MessageID,
+					currentMessageID,
 					fmt.Sprintf("❌ Error: %v", err),
 				)
+				editMsg.ReplyMarkup = nil // Remove stop button
 				b.api.Send(editMsg)
 				return
 			}
@@ -737,6 +803,7 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 				// Final update - show complete chronological log with all tools and text
 				if len(contentHistory) == 0 {
 					editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, currentMessageID, "✅ Done (no output)")
+					editMsg.ReplyMarkup = nil // Remove stop button
 					b.api.Send(editMsg)
 					return
 				}
@@ -749,16 +816,27 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 				displayText := strings.Join(displayParts, "\n\n")
 
 				// Update message, splitting if necessary
-				b.updateOrSplitMessage(msg.Chat.ID, currentMessageID, displayText, &sentCharCount, &messagePartNum)
+				currentMessageID = b.updateOrSplitMessage(msg.Chat.ID, currentMessageID, displayText, &sentCharCount, &messagePartNum)
+
+				// Remove stop button from final message
+				editMarkup := tgbotapi.EditMessageReplyMarkupConfig{
+					BaseEdit: tgbotapi.BaseEdit{
+						ChatID:    msg.Chat.ID,
+						MessageID: currentMessageID,
+					},
+				}
+				editMarkup.ReplyMarkup = nil
+				b.api.Send(editMarkup)
 				return
 
 			case "error":
 				log.Printf("Claude error: %s", response.Error)
 				editMsg := tgbotapi.NewEditMessageText(
 					msg.Chat.ID,
-					sentMsg.MessageID,
+					currentMessageID,
 					fmt.Sprintf("❌ Error: %s", response.Error),
 				)
+				editMsg.ReplyMarkup = nil // Remove stop button
 				b.api.Send(editMsg)
 				return
 			}
