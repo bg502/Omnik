@@ -161,8 +161,20 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 			return
 		}
 
-		// Forward text message to Claude
-		b.forwardToClaude(ctx, msg)
+		// Check if there's already an active query for this chat
+		b.stopMutex.Lock()
+		_, queryRunning := b.stopChannels[msg.Chat.ID]
+		b.stopMutex.Unlock()
+
+		if queryRunning {
+			// Send message indicating query is already in progress
+			reply := tgbotapi.NewMessage(msg.Chat.ID, "⏳ Already processing a query. Please wait or use the ⏹️ Stop button to cancel it.")
+			b.api.Send(reply)
+			return
+		}
+
+		// Forward text message to Claude (run in goroutine to not block update loop)
+		go b.forwardToClaude(ctx, msg)
 		return
 	}
 }
@@ -682,10 +694,20 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 			log.Printf("Stop requested by user")
 			// Cancel the query
 			cancelQuery()
-			// Update message to show stopped status and remove stop button
-			editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, currentMessageID, "⏹️ Stopped by user")
-			editMsg.ReplyMarkup = nil // Remove stop button
-			b.api.Send(editMsg)
+
+			// Remove stop button from current message (preserve content!)
+			editMarkup := tgbotapi.EditMessageReplyMarkupConfig{
+				BaseEdit: tgbotapi.BaseEdit{
+					ChatID:    msg.Chat.ID,
+					MessageID: currentMessageID,
+				},
+			}
+			editMarkup.ReplyMarkup = nil
+			b.api.Send(editMarkup)
+
+			// Send separate stop notification
+			stopMsg := tgbotapi.NewMessage(msg.Chat.ID, "⏹️ Stopped by user")
+			b.api.Send(stopMsg)
 			return
 
 		case err := <-errorChan:
@@ -718,6 +740,11 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 					continue
 				}
 
+				// Debug: Log message type
+				if msgType, ok := sdkMsg["type"].(string); ok {
+					log.Printf("[DEBUG] Received message type: %s", msgType)
+				}
+
 				// Extract session ID if this is a system message
 				if msgType, ok := sdkMsg["type"].(string); ok && msgType == "system" {
 					if sessionID, ok := sdkMsg["session_id"].(string); ok && sessionID != "" {
@@ -744,6 +771,7 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 									// Extract text content
 									if contentType == "text" {
 										if text, ok := contentItem["text"].(string); ok {
+											log.Printf("[DEBUG] Extracted text content (length: %d): %s...", len(text), text[:min(50, len(text))])
 											// Append to last text event or create new one
 											if len(contentHistory) > 0 && contentHistory[len(contentHistory)-1].eventType == "text" {
 												// Append to existing text event
@@ -789,6 +817,8 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 						displayParts = append(displayParts, event.content)
 					}
 					displayText := strings.Join(displayParts, "\n\n")
+
+					log.Printf("[DEBUG] Updating message. History items: %d, Display length: %d", len(contentHistory), len(displayText))
 
 					if displayText != "" {
 						// Update message, splitting if necessary
