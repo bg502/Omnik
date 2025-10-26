@@ -156,6 +156,12 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		case "📋 ls":
 			b.executeCommand(ctx, msg, "ls", "")
 			return
+		case "🔧 MCP":
+			b.executeCommand(ctx, msg, "mcp", "")
+			return
+		case "🔄 Reload":
+			b.executeCommand(ctx, msg, "reload", "")
+			return
 		case "ℹ️ Help":
 			b.executeCommand(ctx, msg, "start", "")
 			return
@@ -243,6 +249,146 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQ
 			log.Printf("No active query found for chat %d", query.Message.Chat.ID)
 		}
 
+	} else if data == "reload_confirm" {
+		// Acknowledge callback
+		b.api.Request(tgbotapi.NewCallback(query.ID, "🔄 Reloading session..."))
+
+		// Delete confirmation message
+		deleteMsg := tgbotapi.NewDeleteMessage(query.Message.Chat.ID, query.Message.MessageID)
+		b.api.Request(deleteMsg)
+
+		// Perform reload
+		b.reloadSession(ctx, query.Message.Chat.ID)
+
+	} else if data == "reload_cancel" {
+		// Acknowledge callback
+		b.api.Request(tgbotapi.NewCallback(query.ID, "❌ Cancelled"))
+
+		// Delete confirmation message
+		deleteMsg := tgbotapi.NewDeleteMessage(query.Message.Chat.ID, query.Message.MessageID)
+		b.api.Request(deleteMsg)
+
+		b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID, "Reload cancelled."))
+
+	} else if strings.HasPrefix(data, "mcp:") {
+		// Extract session name
+		sessionName := strings.TrimPrefix(data, "mcp:")
+
+		// Get session details to show working directory
+		sessions := b.sessionManager.List()
+		var targetSession *session.Session
+		for _, s := range sessions {
+			if s.Name == sessionName {
+				targetSession = s
+				break
+			}
+		}
+
+		if targetSession == nil {
+			b.api.Request(tgbotapi.NewCallback(query.ID, "❌ Session not found"))
+			return
+		}
+
+		// Acknowledge callback
+		b.api.Request(tgbotapi.NewCallback(query.ID, ""))
+
+		// Show MCP management menu
+		menuMsg := tgbotapi.NewMessage(query.Message.Chat.ID,
+			fmt.Sprintf("MCP Management for: %s\n"+
+				"Working directory: %s\n\n"+
+				"Available commands:\n"+
+				"• /mcp - List MCP servers\n"+
+				"• /mcpadd <transport> <name> <url> - Add MCP server\n\n"+
+				"Examples:\n"+
+				"• /mcpadd http archon http://archon-mcp:8051/mcp\n"+
+				"• /mcpadd stdio myserver /path/to/server",
+				sessionName, targetSession.WorkingDir))
+
+		// Add inline keyboard with quick actions
+		menuMsg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					"📋 List MCP Servers",
+					"mcp_list:"+sessionName,
+				),
+			),
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData(
+					"◀️ Back to Sessions",
+					"back_to_sessions",
+				),
+			),
+		)
+
+		b.api.Send(menuMsg)
+
+	} else if strings.HasPrefix(data, "mcp_list:") {
+		sessionName := strings.TrimPrefix(data, "mcp_list:")
+
+		// Get session
+		sessions := b.sessionManager.List()
+		var targetSession *session.Session
+		for _, s := range sessions {
+			if s.Name == sessionName {
+				targetSession = s
+				break
+			}
+		}
+
+		if targetSession == nil {
+			b.api.Request(tgbotapi.NewCallback(query.ID, "❌ Session not found"))
+			return
+		}
+
+		// Acknowledge callback
+		b.api.Request(tgbotapi.NewCallback(query.ID, "🔍 Checking MCP servers..."))
+
+		// Execute claude mcp list from session's working directory
+		cmd := exec.Command("claude", "mcp", "list")
+		cmd.Dir = targetSession.WorkingDir
+		output, err := cmd.CombinedOutput()
+
+		var text string
+		if err != nil {
+			text = fmt.Sprintf("Error listing MCP servers:\n%v\n\nOutput:\n%s", err, string(output))
+		} else {
+			text = fmt.Sprintf("MCP Servers for: %s\n\n%s", sessionName, string(output))
+		}
+
+		b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID, text))
+
+	} else if data == "back_to_sessions" {
+		// Acknowledge callback
+		b.api.Request(tgbotapi.NewCallback(query.ID, ""))
+
+		// Re-show sessions list
+		sessions := b.sessionManager.List()
+		if len(sessions) == 0 {
+			b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID, "No sessions found"))
+			return
+		}
+
+		var text strings.Builder
+		text.WriteString(fmt.Sprintf("Sessions (%d)\n\n", len(sessions)))
+
+		currentSession := b.sessionManager.Current()
+		for _, s := range sessions {
+			marker := "  "
+			if currentSession != nil && s.Name == currentSession.Name {
+				marker = "→ "
+			}
+			text.WriteString(fmt.Sprintf("%s%s\n", marker, s.Name))
+			if s.Description != "" {
+				text.WriteString(fmt.Sprintf("   %s\n", s.Description))
+			}
+			text.WriteString(fmt.Sprintf("   Dir: %s\n", s.WorkingDir))
+			text.WriteString(fmt.Sprintf("   Last used: %s\n\n", s.LastUsedAt.Format("2006-01-02 15:04")))
+		}
+
+		reply := tgbotapi.NewMessage(query.Message.Chat.ID, text.String())
+		reply.ReplyMarkup = b.createSessionsInlineKeyboard(sessions)
+		b.api.Send(reply)
+
 	} else {
 		// Unknown callback
 		b.api.Request(tgbotapi.NewCallback(query.ID, "❌ Unknown action"))
@@ -268,7 +414,11 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 				"/newsession <name> [description] - Create new session\n"+
 				"/switch <name> - Switch to session\n"+
 				"/delsession <name> - Delete session\n"+
-				"/status - Show current session status")
+				"/status - Show current session status\n\n"+
+				"**MCP Management:**\n"+
+				"/mcp - List MCP servers for current project\n"+
+				"/mcpadd <transport> <name> <url> - Add MCP server\n"+
+				"/reload - Reload session to apply MCP changes")
 		reply.ReplyMarkup = createMainKeyboard()
 		reply.ParseMode = "Markdown"
 		b.api.Send(reply)
@@ -389,10 +539,10 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Deleted session: %s", args)))
 
 	case "pwd":
-		b.execDirectCommand(msg, "pwd")
+		b.execDirectCommand(msg, "", "pwd")
 
 	case "ls":
-		b.execDirectCommand(msg, "ls", "-lah", b.workingDir)
+		b.execDirectCommand(msg, "", "ls", "-lah", b.workingDir)
 
 	case "cd":
 		if args == "" {
@@ -439,14 +589,85 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 		if !strings.HasPrefix(args, "/") {
 			filePath = b.workingDir + "/" + args
 		}
-		b.execDirectCommand(msg, "cat", filePath)
+		b.execDirectCommand(msg, "", "cat", filePath)
 
 	case "exec":
 		if args == "" {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /exec <command>"))
 			return
 		}
-		b.execDirectCommand(msg, "bash", "-c", fmt.Sprintf("cd %s && %s", b.workingDir, args))
+		b.execDirectCommand(msg, "", "bash", "-c", fmt.Sprintf("cd %s && %s", b.workingDir, args))
+
+	case "mcp":
+		// MCP server management: /mcp list
+		// Use current working directory for project-specific MCP configuration
+		if args == "" {
+			b.execDirectCommand(msg, b.workingDir, "claude", "mcp", "list")
+			return
+		}
+		// Parse subcommand
+		parts := strings.Fields(args)
+		subCmd := parts[0]
+
+		switch subCmd {
+		case "list":
+			b.execDirectCommand(msg, b.workingDir, "claude", "mcp", "list")
+		default:
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "MCP commands:\n/mcp - List MCP servers\n/mcp list - List MCP servers"))
+		}
+
+	case "mcpadd":
+		// Usage: /mcpadd <transport> <name> <url>
+		if args == "" {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID,
+				"Usage: /mcpadd <transport> <name> <url>\n\n"+
+					"Transport types: http, stdio, sse\n\n"+
+					"Examples:\n"+
+					"• /mcpadd http archon http://archon-mcp:8051/mcp\n"+
+					"• /mcpadd stdio myserver /path/to/server\n\n"+
+					fmt.Sprintf("Current directory: %s", b.workingDir)))
+			return
+		}
+
+		parts := strings.Fields(args)
+		if len(parts) < 3 {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID,
+				"❌ Error: Need 3 arguments: <transport> <name> <url>"))
+			return
+		}
+
+		transport := parts[0]
+		name := parts[1]
+		url := parts[2]
+
+		// Validate transport type
+		if transport != "http" && transport != "stdio" && transport != "sse" {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID,
+				"❌ Error: transport must be http, stdio, or sse"))
+			return
+		}
+
+		// Execute claude mcp add from session's working directory
+		b.execDirectCommand(msg, b.workingDir, "claude", "mcp", "add",
+			"--transport", transport, name, url)
+
+	case "reload":
+		// Show confirmation dialog
+		currentSession := b.sessionManager.Current()
+		if currentSession == nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "No active session to reload."))
+			return
+		}
+
+		confirmMsg := tgbotapi.NewMessage(msg.Chat.ID,
+			fmt.Sprintf("⚠️ This will create a new session to reload MCP servers.\n\nCurrent session: %s\n\nAre you sure?", currentSession.Name))
+		confirmMsg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("✅ Yes", "reload_confirm"),
+				tgbotapi.NewInlineKeyboardButtonData("❌ No", "reload_cancel"),
+			),
+		)
+		b.api.Send(confirmMsg)
 
 	default:
 		reply := tgbotapi.NewMessage(msg.Chat.ID, "Unknown command. Use /start for help.")
@@ -462,7 +683,8 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 }
 
 // execDirectCommand executes a command directly using os/exec
-func (b *Bot) execDirectCommand(msg *tgbotapi.Message, command string, args ...string) {
+// If workDir is empty, uses b.workingDir as the working directory
+func (b *Bot) execDirectCommand(msg *tgbotapi.Message, workDir string, command string, args ...string) {
 	log.Printf("Executing command directly: %s %v", command, args)
 
 	// Send thinking message
@@ -473,9 +695,14 @@ func (b *Bot) execDirectCommand(msg *tgbotapi.Message, command string, args ...s
 		return
 	}
 
+	// Determine working directory
+	if workDir == "" {
+		workDir = b.workingDir
+	}
+
 	// Execute command
 	cmd := exec.Command(command, args...)
-	cmd.Dir = b.workingDir
+	cmd.Dir = workDir
 	output, err := cmd.CombinedOutput()
 
 	// Prepare response text
@@ -497,6 +724,44 @@ func (b *Bot) execDirectCommand(msg *tgbotapi.Message, command string, args ...s
 	// Send result
 	editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID, text)
 	b.api.Send(editMsg)
+}
+
+// reloadSession creates a new session to reload MCP servers
+func (b *Bot) reloadSession(ctx context.Context, chatID int64) {
+	currentSession := b.sessionManager.Current()
+	if currentSession == nil {
+		b.api.Send(tgbotapi.NewMessage(chatID, "No active session to reload."))
+		return
+	}
+
+	// Save session info before deleting
+	sessionName := currentSession.Name
+	sessionDesc := currentSession.Description
+	workingDir := currentSession.WorkingDir
+
+	// Delete current session to clear conversation history
+	if err := b.sessionManager.Delete(sessionName); err != nil {
+		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Failed to delete session: %v", err)))
+		return
+	}
+
+	// Create new session with SAME name (reloads MCP servers)
+	newSession, err := b.sessionManager.Create(sessionName, sessionDesc, workingDir)
+	if err != nil {
+		b.api.Send(tgbotapi.NewMessage(chatID, fmt.Sprintf("Failed to create new session: %v", err)))
+		return
+	}
+
+	// Update working directory
+	b.workingDir = newSession.WorkingDir
+
+	// Send success message
+	msg := tgbotapi.NewMessage(chatID,
+		fmt.Sprintf("✅ Session reloaded: %s\n\nConversation cleared. MCP servers should now be available.",
+			newSession.Name))
+	b.api.Send(msg)
+
+	log.Printf("Session reloaded: %s (cleared and recreated)", sessionName)
 }
 
 // formatToolUsage formats a tool use for display in Telegram
@@ -913,6 +1178,10 @@ func createMainKeyboard() tgbotapi.ReplyKeyboardMarkup {
 			tgbotapi.NewKeyboardButton("📋 ls"),
 		),
 		tgbotapi.NewKeyboardButtonRow(
+			tgbotapi.NewKeyboardButton("🔧 MCP"),
+			tgbotapi.NewKeyboardButton("🔄 Reload"),
+		),
+		tgbotapi.NewKeyboardButtonRow(
 			tgbotapi.NewKeyboardButton("ℹ️ Help"),
 		),
 	)
@@ -924,7 +1193,7 @@ func (b *Bot) createSessionsInlineKeyboard(sessions []*session.Session) tgbotapi
 
 	currentSession := b.sessionManager.Current()
 
-	// Add a button for each session
+	// Add a row with buttons for each session
 	for _, s := range sessions {
 		// Skip current session (already active)
 		if currentSession != nil && s.Name == currentSession.Name {
@@ -933,8 +1202,12 @@ func (b *Bot) createSessionsInlineKeyboard(sessions []*session.Session) tgbotapi
 
 		row := tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
-				"➡️ "+s.Name,
+				"➡️ Switch: "+s.Name,
 				"switch:"+s.Name,
+			),
+			tgbotapi.NewInlineKeyboardButtonData(
+				"🔧 MCP",
+				"mcp:"+s.Name,
 			),
 		)
 		rows = append(rows, row)
@@ -947,6 +1220,16 @@ func (b *Bot) createSessionsInlineKeyboard(sessions []*session.Session) tgbotapi
 			"newsession",
 		),
 	))
+
+	// Add MCP button for current session
+	if currentSession != nil {
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData(
+				"🔧 MCP for current session",
+				"mcp:"+currentSession.Name,
+			),
+		))
+	}
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
 }

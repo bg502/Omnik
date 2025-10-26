@@ -9,7 +9,9 @@
       "Bash(docker stop:*)",
       "WebFetch(domain:docs.github.com)",
       "Bash(docker exec:*)",
-      "Bash(docker ps:*)"
+      "Bash(docker ps:*)",
+      "Bash(docker inspect:*)",
+      "Bash(docker volume inspect:*)"
     ],
     "deny": [],
     "ask": []

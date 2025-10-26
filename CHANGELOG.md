@@ -2,6 +2,93 @@
 
 All notable changes to Omnik will be documented in this file.
 
+## [1.0.003] - 2025-10-26
+
+### 🚀 New Features
+
+**MCP Server Integration:**
+- Added support for Model Context Protocol (MCP) servers
+- New `/mcp` command to list configured MCP servers
+- New `/reload` command to reload MCP configuration
+- MCP configuration persists globally across all sessions
+- MCP servers remain available after container restarts
+
+**Enhanced Keyboard Interface:**
+- Added "🔧 MCP" button to main keyboard for quick MCP server listing
+- Added "🔄 Reload" button to reload MCP configuration
+- Reload includes confirmation dialog (Yes/No) to prevent accidental reloads
+- Updated keyboard layout:
+  ```
+  [📂 Sessions] [📊 Status]
+  [📁 pwd] [📋 ls]
+  [🔧 MCP] [🔄 Reload]
+  [ℹ️ Help]
+  ```
+
+**Improved Tool Display:**
+- Increased Bash command display limit from 40 to 150 characters
+- Better visibility of command parameters in tool usage messages
+- More context when viewing Claude's tool execution
+
+**Network Configuration:**
+- Connected omnik container to external `kb_network`
+- Maintains both internal (`omnik-net`) and external network connectivity
+- Enables communication with other services on shared network
+
+### 🔧 Technical Changes
+
+**Volume Mount Updates:**
+- Changed volume mount from `claude-auth:/home/node/.claude` to `claude-home:/home/node`
+- Ensures MCP configuration file (`.claude.json`) persists across restarts
+- MCP servers now available globally to all sessions
+
+**Session Management:**
+- Reload command deletes and recreates session with same name
+- Session name preservation during reload (no "-reloaded" suffix)
+- Clears conversation history while maintaining session identity
+- Triggers MCP server reload for new sessions
+
+**Updated Files:**
+- `docker-compose.yml` - Volume mount and network configuration
+- `go-bot/internal/bot/bot.go` - MCP commands, reload logic, keyboard layout
+- Volume renamed: `claude-auth` → `claude-home`
+
+### Why These Changes?
+
+**MCP Integration:**
+MCP (Model Context Protocol) allows Claude to connect to external services and tools, extending its capabilities beyond the built-in toolset. This enables integration with custom APIs, databases, and specialized services.
+
+**Persistence:**
+Previous implementation stored MCP configuration in a non-persistent location, requiring reconfiguration after each container restart. The new volume mount ensures MCP servers remain configured across restarts and are available in all sessions.
+
+**Reload Functionality:**
+MCP servers are loaded when Claude CLI starts a new session. The reload command provides a way to pick up newly added MCP servers without restarting the entire container, maintaining session name and workspace context.
+
+### Migration Instructions
+
+**After updating code:**
+```bash
+# Rebuild container with new volume configuration
+docker compose down
+docker compose build omnik
+docker compose up -d omnik
+
+# MCP servers will need to be re-added after first rebuild
+# Example: Add archon MCP server
+docker compose exec omnik claude mcp add --transport http archon http://archon-mcp:8051/mcp
+
+# Verify MCP server is connected
+docker compose exec omnik claude mcp list
+```
+
+**Using MCP Features:**
+- Use `/mcp` command in Telegram to list configured MCP servers
+- Use `/reload` command to reload MCP configuration after adding new servers
+- MCP servers are available in all sessions (global configuration)
+- Test MCP tools by asking Claude to use them in conversation
+
+---
+
 ## [1.0.002] - 2025-10-25
 
 ### 🔧 Breaking Changes
