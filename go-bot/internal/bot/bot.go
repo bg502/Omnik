@@ -135,6 +135,10 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	// Log incoming message details
+	log.Printf("✅ Message from user %d in chat %d (type: %s, title: %q)",
+		msg.From.ID, msg.Chat.ID, msg.Chat.Type, msg.Chat.Title)
+
 	// Handle commands
 	if msg.IsCommand() {
 		b.handleCommand(ctx, msg)
@@ -197,6 +201,11 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQ
 	// Parse callback data
 	data := query.Data
 	log.Printf("Received callback query: %s", data)
+
+	// Log callback query details
+	log.Printf("✅ Callback from user %d in chat %d (type: %s, title: %q, data: %s)",
+		query.From.ID, query.Message.Chat.ID, query.Message.Chat.Type,
+		query.Message.Chat.Title, query.Data)
 
 	// Handle different callback types
 	if strings.HasPrefix(data, "switch:") {
