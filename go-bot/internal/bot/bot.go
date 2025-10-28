@@ -491,6 +491,10 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 				"/switch <name> - Switch to session\n"+
 				"/delsession <name> - Delete session\n"+
 				"/status - Show current session status\n\n"+
+				"**Archive Management:**\n"+
+				"/archives - List archived sessions\n"+
+				"/archive-view <name> - View archive details\n"+
+				"/archive-delete <name> - Delete archive\n\n"+
 				"**MCP Management:**\n"+
 				"/mcp - List MCP servers for current project\n"+
 				"/mcpadd <transport> <name> <url> - Add MCP server\n"+
@@ -505,6 +509,10 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 		if currentSession == nil {
 			status = "No active session\n\nUse /newsession to create one"
 		} else {
+			// Get session size
+			sizeBytes, messageCount, _ := b.sessionManager.GetSessionSize(currentSession.Name)
+			sizeMB := float64(sizeBytes) / (1024 * 1024)
+
 			status = fmt.Sprintf(
 				"Current Session\n\n"+
 					"Name: %s\n"+
@@ -512,14 +520,22 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 					"Working Dir: %s\n"+
 					"Created: %s\n"+
 					"Last Used: %s\n"+
-					"Session ID: %s",
+					"Session ID: %s\n"+
+					"Size: %.2f MB (%d messages)",
 				currentSession.Name,
 				currentSession.Description,
 				currentSession.WorkingDir,
 				currentSession.CreatedAt.Format("2006-01-02 15:04"),
 				currentSession.LastUsedAt.Format("2006-01-02 15:04"),
 				currentSession.ID,
+				sizeMB,
+				messageCount,
 			)
+
+			// Add warning if session is getting large
+			if sizeMB > 2.0 || messageCount > 1000 {
+				status += "\n\n⚠️ Session is getting large. Consider using /reload to start fresh."
+			}
 		}
 		reply := tgbotapi.NewMessage(msg.Chat.ID, status)
 		b.api.Send(reply)
@@ -745,6 +761,96 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			),
 		)
 		b.api.Send(confirmMsg)
+
+	case "archives":
+		// List all archived sessions
+		archives, err := b.sessionManager.ListArchives()
+		if err != nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
+			return
+		}
+
+		if len(archives) == 0 {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "No archived sessions found"))
+			return
+		}
+
+		var text strings.Builder
+		text.WriteString(fmt.Sprintf("📦 Archived Sessions (%d)\n\n", len(archives)))
+
+		for _, a := range archives {
+			text.WriteString(fmt.Sprintf("🗂 %s\n", a.OriginalName))
+			if a.Description != "" {
+				text.WriteString(fmt.Sprintf("   %s\n", a.Description))
+			}
+			text.WriteString(fmt.Sprintf("   Archived: %s\n", a.ArchivedAt.Format("2006-01-02 15:04")))
+			sizeMB := float64(a.FileSizeBytes) / (1024 * 1024)
+			text.WriteString(fmt.Sprintf("   Size: %.2f MB (%d messages)\n", sizeMB, a.MessageCount))
+			text.WriteString(fmt.Sprintf("   Working Dir: %s\n\n", a.WorkingDir))
+		}
+
+		text.WriteString("\nUse /archive-view <name> to see details\n")
+		text.WriteString("Use /archive-delete <name> to delete an archive")
+
+		reply := tgbotapi.NewMessage(msg.Chat.ID, text.String())
+		b.api.Send(reply)
+
+	case "archive-view":
+		if args == "" {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /archive-view <name>"))
+			return
+		}
+
+		archive, err := b.sessionManager.GetArchive(args)
+		if err != nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
+			return
+		}
+
+		sizeMB := float64(archive.FileSizeBytes) / (1024 * 1024)
+		status := fmt.Sprintf(
+			"📦 Archived Session\n\n"+
+				"Name: %s\n"+
+				"Description: %s\n"+
+				"Original ID: %s\n"+
+				"Working Dir: %s\n"+
+				"Archived: %s\n"+
+				"Size: %.2f MB\n"+
+				"Messages: %d\n"+
+				"Archive Path: %s",
+			archive.OriginalName,
+			archive.Description,
+			archive.OriginalID,
+			archive.WorkingDir,
+			archive.ArchivedAt.Format("2006-01-02 15:04:05"),
+			sizeMB,
+			archive.MessageCount,
+			archive.ArchivePath,
+		)
+
+		reply := tgbotapi.NewMessage(msg.Chat.ID, status)
+		b.api.Send(reply)
+
+	case "archive-delete":
+		if args == "" {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /archive-delete <name>"))
+			return
+		}
+
+		// Get archive details first
+		archive, err := b.sessionManager.GetArchive(args)
+		if err != nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
+			return
+		}
+
+		// Delete the archive
+		if err := b.sessionManager.DeleteArchive(args); err != nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
+			return
+		}
+
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Deleted archive: %s", archive.OriginalName)))
 
 	default:
 		reply := tgbotapi.NewMessage(msg.Chat.ID, "Unknown command. Use /start for help.")

@@ -21,6 +21,7 @@ services:
     volumes:
       - workspace:/workspace
       - claude-home:/home/node
+      - omnik-archives:/archives
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - omnik-net
@@ -59,6 +60,7 @@ services:
     volumes:
       - workspace:/workspace
       - claude-home:/home/node
+      - omnik-archives:/archives
       - /var/run/docker.sock:/var/run/docker.sock
     networks:
       - omnik-net
@@ -82,4 +84,6 @@ volumes:
   workspace:
     driver: local
   claude-home:
+    driver: local
+  omnik-archives:
     driver: local
