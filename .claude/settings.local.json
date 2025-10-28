@@ -11,7 +11,17 @@
       "Bash(docker exec:*)",
       "Bash(docker ps:*)",
       "Bash(docker inspect:*)",
-      "Bash(docker volume inspect:*)"
+      "Bash(docker volume inspect:*)",
+      "Bash(./scripts/status.sh:*)",
+      "Bash(chmod:*)",
+      "Bash(./scripts/send-to-topic.sh:*)",
+      "Bash(for id in 5 6 7 8 9 10)",
+      "Bash(do echo \"Testing topic $id...\" ./scripts/send-to-topic.sh $id \"Test\")",
+      "Bash(echo \"Topic $id: not found or no name\" done)",
+      "Bash(git checkout:*)",
+      "Bash(./scripts/query.sh:*)",
+      "Bash(./scripts/api-query.sh:*)",
+      "Bash(docker logs:*)"
     ],
     "deny": [],
     "ask": []

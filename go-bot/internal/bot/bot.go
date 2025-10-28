@@ -18,24 +18,33 @@ import (
 	"github.com/drew/omnik-bot/internal/session"
 )
 
+// ChatContext holds session context for a specific chat
+type ChatContext struct {
+	ChatID         int64
+	CurrentSession string // Current session name for this chat
+	WorkingDir     string // Current working directory for this chat
+}
+
 // Bot represents the Telegram bot
 type Bot struct {
 	api            *tgbotapi.BotAPI
-	claudeClient   claude.QueryClient // Interface for both HTTP and SDK clients
+	claudeClient   claude.QueryClient
 	sessionManager *session.Manager
 	authorizedUID  int64
-	workingDir     string // Current working directory for debugging
+	authChatID     int64                 // Optional: Authorized chat ID (for programmatic access)
+	chatContexts   map[int64]*ChatContext // Per-chat session contexts
+	contextMutex   sync.RWMutex          // Protect chatContexts map
 	stopChannels   map[int64]chan struct{} // Track stop signals for active queries
 	stopMutex      sync.Mutex              // Protect stopChannels map
 }
 
 // Config holds bot configuration
 type Config struct {
-	TelegramToken   string
-	AuthorizedUID   int64
-	ClaudeBridgeURL string // For HTTP mode (legacy)
-	UseSDK          bool   // Use SDK client instead of HTTP
-	ClaudeModel     string // Model to use (sonnet, opus, etc)
+	TelegramToken string
+	AuthorizedUID int64
+	AuthChatID    int64  // Optional: Allow messages from specific chat (for programmatic access)
+	UseSDK        bool   // Use SDK client instead of HTTP
+	ClaudeModel   string // Model to use (sonnet, opus, etc)
 }
 
 // New creates a new bot instance
@@ -47,15 +56,9 @@ func New(cfg Config) (*Bot, error) {
 
 	log.Printf("Authorized on account %s", api.Self.UserName)
 
-	// Create appropriate Claude client
-	var claudeClient claude.QueryClient
-	if cfg.UseSDK {
-		log.Printf("Using Claude CLI client (model: %s)", cfg.ClaudeModel)
-		claudeClient = claude.NewCLIClient(cfg.ClaudeModel, "bypassPermissions")
-	} else {
-		log.Printf("Using Claude HTTP client (bridge: %s)", cfg.ClaudeBridgeURL)
-		claudeClient = claude.NewClient(cfg.ClaudeBridgeURL)
-	}
+	// Create Claude CLI client
+	log.Printf("Using Claude CLI client (model: %s)", cfg.ClaudeModel)
+	claudeClient := claude.NewCLIClient(cfg.ClaudeModel, "bypassPermissions")
 
 	// Check Claude health
 	ctx := context.Background()
@@ -80,21 +83,75 @@ func New(cfg Config) (*Bot, error) {
 		log.Printf("Created default session")
 	}
 
-	// Get current session's working directory
-	currentSession := sessionManager.Current()
-	workingDir := "/workspace"
-	if currentSession != nil {
-		workingDir = currentSession.WorkingDir
-	}
-
 	return &Bot{
 		api:            api,
 		claudeClient:   claudeClient,
 		sessionManager: sessionManager,
 		authorizedUID:  cfg.AuthorizedUID,
-		workingDir:     workingDir,
+		authChatID:     cfg.AuthChatID,
+		chatContexts:   make(map[int64]*ChatContext),
 		stopChannels:   make(map[int64]chan struct{}),
 	}, nil
+}
+
+// getChatContext gets or creates a chat context for the given chat ID
+func (b *Bot) getChatContext(chatID int64) *ChatContext {
+	b.contextMutex.RLock()
+	ctx, exists := b.chatContexts[chatID]
+	b.contextMutex.RUnlock()
+
+	if exists {
+		return ctx
+	}
+
+	// Create new context
+	b.contextMutex.Lock()
+	defer b.contextMutex.Unlock()
+
+	// Double-check after acquiring write lock
+	if ctx, exists := b.chatContexts[chatID]; exists {
+		return ctx
+	}
+
+	// Initialize new chat context
+	currentSession := b.sessionManager.Current()
+	workingDir := "/workspace"
+	currentSessionName := ""
+
+	if currentSession != nil {
+		workingDir = currentSession.WorkingDir
+		currentSessionName = currentSession.Name
+	}
+
+	ctx = &ChatContext{
+		ChatID:         chatID,
+		CurrentSession: currentSessionName,
+		WorkingDir:     workingDir,
+	}
+
+	b.chatContexts[chatID] = ctx
+	log.Printf("[ChatContext] Created context for chat %d: session=%q workingDir=%q",
+		chatID, currentSessionName, workingDir)
+
+	return ctx
+}
+
+// updateChatContext updates the chat context with new session/working directory
+func (b *Bot) updateChatContext(chatID int64, sessionName string, workingDir string) {
+	b.contextMutex.Lock()
+	defer b.contextMutex.Unlock()
+
+	ctx, exists := b.chatContexts[chatID]
+	if !exists {
+		ctx = &ChatContext{ChatID: chatID}
+		b.chatContexts[chatID] = ctx
+	}
+
+	ctx.CurrentSession = sessionName
+	ctx.WorkingDir = workingDir
+
+	log.Printf("[ChatContext] Updated context for chat %d: session=%q workingDir=%q",
+		chatID, sessionName, workingDir)
 }
 
 // Start starts the bot
@@ -127,9 +184,12 @@ func (b *Bot) Start(ctx context.Context) error {
 
 // handleMessage processes incoming messages
 func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
-	// Check authorization
-	if msg.From.ID != b.authorizedUID {
-		log.Printf("Unauthorized access attempt from user %d", msg.From.ID)
+	// Check authorization: either authorized user OR authorized chat
+	isAuthorizedUser := msg.From.ID == b.authorizedUID
+	isAuthorizedChat := b.authChatID != 0 && msg.Chat.ID == b.authChatID
+
+	if !isAuthorizedUser && !isAuthorizedChat {
+		log.Printf("Unauthorized access attempt from user %d in chat %d", msg.From.ID, msg.Chat.ID)
 		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ Unauthorized")
 		b.api.Send(reply)
 		return
@@ -191,9 +251,12 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 // handleCallbackQuery handles inline keyboard button callbacks
 func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQuery) {
-	// Check authorization
-	if query.From.ID != b.authorizedUID {
-		log.Printf("Unauthorized callback query from user %d", query.From.ID)
+	// Check authorization: either authorized user OR authorized chat
+	isAuthorizedUser := query.From.ID == b.authorizedUID
+	isAuthorizedChat := b.authChatID != 0 && query.Message.Chat.ID == b.authChatID
+
+	if !isAuthorizedUser && !isAuthorizedChat {
+		log.Printf("Unauthorized callback query from user %d in chat %d", query.From.ID, query.Message.Chat.ID)
 		b.api.Request(tgbotapi.NewCallback(query.ID, "❌ Unauthorized"))
 		return
 	}
@@ -221,18 +284,19 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQ
 			return
 		}
 
-		// Update working directory
+		// Update chat-specific context
 		if switchedSession != nil {
-			b.workingDir = switchedSession.WorkingDir
+			b.updateChatContext(query.Message.Chat.ID, switchedSession.Name, switchedSession.WorkingDir)
 		}
 
 		// Acknowledge callback
 		b.api.Request(tgbotapi.NewCallback(query.ID, "✓ Switched to "+sessionName))
 
 		// Send confirmation message
+		chatCtx := b.getChatContext(query.Message.Chat.ID)
 		b.api.Send(tgbotapi.NewMessage(query.Message.Chat.ID,
 			fmt.Sprintf("Switched to session: %s\nWorking directory: %s",
-				sessionName, b.workingDir)))
+				sessionName, chatCtx.WorkingDir)))
 
 	} else if data == "newsession" {
 		// Acknowledge callback
@@ -406,6 +470,9 @@ func (b *Bot) handleCallbackQuery(ctx context.Context, query *tgbotapi.CallbackQ
 
 // executeCommand executes a command by name (for keyboard buttons)
 func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command string, args string) {
+	// Get chat-specific context
+	chatCtx := b.getChatContext(msg.Chat.ID)
+
 	switch command {
 	case "start":
 		reply := tgbotapi.NewMessage(msg.Chat.ID,
@@ -506,8 +573,8 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			return
 		}
 
-		// Update bot's working directory
-		b.workingDir = newSession.WorkingDir
+		// Update chat context
+		b.updateChatContext(msg.Chat.ID, newSession.Name, newSession.WorkingDir)
 
 		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Created and switched to session: %s", name)))
 
@@ -524,8 +591,8 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			return
 		}
 
-		// Update bot's working directory
-		b.workingDir = switchedSession.WorkingDir
+		// Update chat context
+		b.updateChatContext(msg.Chat.ID, switchedSession.Name, switchedSession.WorkingDir)
 
 		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf(
 			"Switched to session: %s\nWorking directory: %s",
@@ -548,10 +615,10 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Deleted session: %s", args)))
 
 	case "pwd":
-		b.execDirectCommand(msg, "", "pwd")
+		b.execDirectCommand(msg, chatCtx.WorkingDir, "pwd")
 
 	case "ls":
-		b.execDirectCommand(msg, "", "ls", "-lah", b.workingDir)
+		b.execDirectCommand(msg, chatCtx.WorkingDir, "ls", "-lah", chatCtx.WorkingDir)
 
 	case "cd":
 		if args == "" {
@@ -566,7 +633,7 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			newDir = args
 		} else {
 			// Relative to current working directory
-			newDir = b.workingDir + "/" + args
+			newDir = chatCtx.WorkingDir + "/" + args
 		}
 
 		// Clean the path (resolve .., ., etc.)
@@ -578,14 +645,15 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			return
 		}
 
-		b.workingDir = newDir
+		// Update chat context
+		b.updateChatContext(msg.Chat.ID, chatCtx.CurrentSession, newDir)
 
 		// Save working directory to session
 		if err := b.sessionManager.UpdateWorkingDir(newDir); err != nil {
 			log.Printf("Warning: failed to save working directory: %v", err)
 		}
 
-		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Working directory changed to: %s", b.workingDir)))
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Working directory changed to: %s", newDir)))
 
 	case "cat":
 		if args == "" {
@@ -596,22 +664,22 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 		// Resolve to absolute path if relative
 		filePath := args
 		if !strings.HasPrefix(args, "/") {
-			filePath = b.workingDir + "/" + args
+			filePath = chatCtx.WorkingDir + "/" + args
 		}
-		b.execDirectCommand(msg, "", "cat", filePath)
+		b.execDirectCommand(msg, chatCtx.WorkingDir, "cat", filePath)
 
 	case "exec":
 		if args == "" {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /exec <command>"))
 			return
 		}
-		b.execDirectCommand(msg, "", "bash", "-c", fmt.Sprintf("cd %s && %s", b.workingDir, args))
+		b.execDirectCommand(msg, chatCtx.WorkingDir, "bash", "-c", fmt.Sprintf("cd %s && %s", chatCtx.WorkingDir, args))
 
 	case "mcp":
 		// MCP server management: /mcp list
 		// Use current working directory for project-specific MCP configuration
 		if args == "" {
-			b.execDirectCommand(msg, b.workingDir, "claude", "mcp", "list")
+			b.execDirectCommand(msg, chatCtx.WorkingDir, "claude", "mcp", "list")
 			return
 		}
 		// Parse subcommand
@@ -620,7 +688,7 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 
 		switch subCmd {
 		case "list":
-			b.execDirectCommand(msg, b.workingDir, "claude", "mcp", "list")
+			b.execDirectCommand(msg, chatCtx.WorkingDir, "claude", "mcp", "list")
 		default:
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "MCP commands:\n/mcp - List MCP servers\n/mcp list - List MCP servers"))
 		}
@@ -634,7 +702,7 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 					"Examples:\n"+
 					"• /mcpadd http archon http://archon-mcp:8051/mcp\n"+
 					"• /mcpadd stdio myserver /path/to/server\n\n"+
-					fmt.Sprintf("Current directory: %s", b.workingDir)))
+					fmt.Sprintf("Current directory: %s", chatCtx.WorkingDir)))
 			return
 		}
 
@@ -657,7 +725,7 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 		}
 
 		// Execute claude mcp add from session's working directory
-		b.execDirectCommand(msg, b.workingDir, "claude", "mcp", "add",
+		b.execDirectCommand(msg, chatCtx.WorkingDir, "claude", "mcp", "add",
 			"--transport", transport, name, url)
 
 	case "reload":
@@ -692,9 +760,9 @@ func (b *Bot) handleCommand(ctx context.Context, msg *tgbotapi.Message) {
 }
 
 // execDirectCommand executes a command directly using os/exec
-// If workDir is empty, uses b.workingDir as the working directory
+// workDir specifies the working directory for command execution
 func (b *Bot) execDirectCommand(msg *tgbotapi.Message, workDir string, command string, args ...string) {
-	log.Printf("Executing command directly: %s %v", command, args)
+	log.Printf("Executing command directly: %s %v (workDir: %s)", command, args, workDir)
 
 	// Send thinking message
 	thinkingMsg := tgbotapi.NewMessage(msg.Chat.ID, "Executing...")
@@ -704,14 +772,11 @@ func (b *Bot) execDirectCommand(msg *tgbotapi.Message, workDir string, command s
 		return
 	}
 
-	// Determine working directory
-	if workDir == "" {
-		workDir = b.workingDir
-	}
-
 	// Execute command
 	cmd := exec.Command(command, args...)
-	cmd.Dir = workDir
+	if workDir != "" {
+		cmd.Dir = workDir
+	}
 	output, err := cmd.CombinedOutput()
 
 	// Prepare response text
@@ -761,8 +826,8 @@ func (b *Bot) reloadSession(ctx context.Context, chatID int64) {
 		return
 	}
 
-	// Update working directory
-	b.workingDir = newSession.WorkingDir
+	// Update chat context
+	b.updateChatContext(chatID, newSession.Name, newSession.WorkingDir)
 
 	// Send success message
 	msg := tgbotapi.NewMessage(chatID,
@@ -903,6 +968,9 @@ func (b *Bot) updateOrSplitMessage(chatID int64, currentMsgID int, fullText stri
 func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 	log.Printf("→ Forwarding to Claude: %s", msg.Text)
 
+	// Get chat context
+	chatCtx := b.getChatContext(msg.Chat.ID)
+
 	// Get current session
 	currentSession := b.sessionManager.Current()
 	if currentSession == nil {
@@ -928,7 +996,7 @@ func (b *Bot) forwardToClaude(ctx context.Context, msg *tgbotapi.Message) {
 	req := claude.QueryRequest{
 		Prompt:         msg.Text,
 		SessionID:      currentSession.ID,
-		Workspace:      b.workingDir,
+		Workspace:      chatCtx.WorkingDir,
 		PermissionMode: "bypassPermissions", // Skip all permission prompts
 	}
 
@@ -1260,7 +1328,17 @@ func LoadConfigFromEnv() (Config, error) {
 		return Config{}, fmt.Errorf("invalid OMNI_AUTHORIZED_USER_ID: %w", err)
 	}
 
-	// Check if using SDK mode
+	// Optional: Chat ID for programmatic access
+	var authChatID int64
+	chatIDStr := os.Getenv("OMNI_TG_AUTH_CHAT_ID")
+	if chatIDStr != "" {
+		authChatID, err = strconv.ParseInt(chatIDStr, 10, 64)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid OMNI_TG_AUTH_CHAT_ID: %w", err)
+		}
+	}
+
+	// Check if using SDK mode (always true now, legacy HTTP mode removed)
 	useSDK := os.Getenv("OMNI_USE_CLAUDE_SDK") == "true"
 
 	// Model configuration
@@ -1269,17 +1347,328 @@ func LoadConfigFromEnv() (Config, error) {
 		model = "sonnet" // Default to sonnet
 	}
 
-	// Bridge URL for HTTP mode (legacy, not used in CLI mode)
-	bridgeURL := os.Getenv("OMNI_CLAUDE_BRIDGE_URL")
-	if bridgeURL == "" {
-		bridgeURL = "http://claude-bridge:9000"
+	return Config{
+		TelegramToken: token,
+		AuthorizedUID: uid,
+		AuthChatID:    authChatID,
+		UseSDK:        useSDK,
+		ClaudeModel:   model,
+	}, nil
+}
+
+// GetSessionManager returns the session manager (for API access)
+func (b *Bot) GetSessionManager() *session.Manager {
+	return b.sessionManager
+}
+
+// ProcessAPIMessage processes a message received via HTTP API
+// This simulates receiving a message as if it came from the authorized user in the API chat
+func (b *Bot) ProcessAPIMessage(ctx context.Context, message string, sessionID string) error {
+	log.Printf("[API] Processing message: %s (session: %s)", message, sessionID)
+
+	// Get or create chat context for API chat
+	chatCtx := b.getChatContext(b.authChatID)
+
+	// If session ID provided, try to switch to that session
+	if sessionID != "" {
+		sess, err := b.sessionManager.Switch(sessionID)
+		if err != nil {
+			log.Printf("[API] Warning: Failed to switch to session %s: %v", sessionID, err)
+		} else if sess != nil {
+			// Update chat context with new session
+			b.updateChatContext(b.authChatID, sess.Name, sess.WorkingDir)
+			chatCtx = b.getChatContext(b.authChatID)
+		}
 	}
 
-	return Config{
-		TelegramToken:   token,
-		AuthorizedUID:   uid,
-		ClaudeBridgeURL: bridgeURL,
-		UseSDK:          useSDK,
-		ClaudeModel:     model,
-	}, nil
+	// Get current session
+	currentSession := b.sessionManager.Current()
+	if currentSession == nil {
+		return fmt.Errorf("no active session")
+	}
+
+	// Send "processing" message with stop button
+	stopButton := tgbotapi.NewInlineKeyboardMarkup(
+		tgbotapi.NewInlineKeyboardRow(
+			tgbotapi.NewInlineKeyboardButtonData("⏹️ Stop", "stop"),
+		),
+	)
+	processingMsg := tgbotapi.NewMessage(b.authChatID, fmt.Sprintf("🔄 API Query: %s", message))
+	processingMsg.ReplyMarkup = stopButton
+	sentMsg, err := b.api.Send(processingMsg)
+	if err != nil {
+		log.Printf("[API] Failed to send processing message: %v", err)
+		return fmt.Errorf("failed to send processing message: %w", err)
+	}
+
+	// Query Claude with the message
+	req := claude.QueryRequest{
+		Prompt:         message,
+		SessionID:      currentSession.ID,
+		Workspace:      chatCtx.WorkingDir,
+		PermissionMode: "bypassPermissions",
+	}
+
+	queryCtx, cancelQuery := context.WithCancel(ctx)
+	defer cancelQuery()
+
+	// Create and register stop channel
+	stopChan := make(chan struct{})
+	b.stopMutex.Lock()
+	b.stopChannels[b.authChatID] = stopChan
+	b.stopMutex.Unlock()
+
+	defer func() {
+		b.stopMutex.Lock()
+		delete(b.stopChannels, b.authChatID)
+		b.stopMutex.Unlock()
+	}()
+
+	responseChan, errorChan := b.claudeClient.Query(queryCtx, req)
+
+	// Track content as chronological events (same as forwardToClaude)
+	type contentEvent struct {
+		eventType string // "text" or "tool"
+		content   string
+	}
+	var contentHistory []contentEvent
+	var lastEdit time.Time
+	messageCount := 0
+	currentMessageID := sentMsg.MessageID
+	messagePartNum := 1
+	sentCharCount := 0
+
+	for {
+		select {
+		case <-stopChan:
+			log.Printf("[API] Stop requested by user")
+			// Cancel the query
+			cancelQuery()
+
+			// Remove stop button from current message
+			editMarkup := tgbotapi.EditMessageReplyMarkupConfig{
+				BaseEdit: tgbotapi.BaseEdit{
+					ChatID:    b.authChatID,
+					MessageID: currentMessageID,
+				},
+			}
+			editMarkup.ReplyMarkup = nil
+			b.api.Send(editMarkup)
+
+			// Send separate stop notification
+			stopMsg := tgbotapi.NewMessage(b.authChatID, "⏹️ Stopped by user")
+			b.api.Send(stopMsg)
+			return nil
+
+		case err := <-errorChan:
+			if err != nil {
+				log.Printf("[API] Claude query error: %v", err)
+				editMsg := tgbotapi.NewEditMessageText(
+					b.authChatID,
+					currentMessageID,
+					fmt.Sprintf("❌ Error: %v", err),
+				)
+				editMsg.ReplyMarkup = nil
+				b.api.Send(editMsg)
+				return fmt.Errorf("claude query error: %w", err)
+			}
+
+		case response, ok := <-responseChan:
+			if !ok {
+				// Channel closed
+				return nil
+			}
+
+			messageCount++
+
+			switch response.Type {
+			case "claude_message":
+				// Parse SDK message
+				var sdkMsg map[string]interface{}
+				if err := json.Unmarshal(response.Data, &sdkMsg); err != nil {
+					log.Printf("[API] Failed to parse SDK message: %v", err)
+					continue
+				}
+
+				// Log message type
+				if msgType, ok := sdkMsg["type"].(string); ok {
+					log.Printf("[API] Received message type: %s", msgType)
+				}
+
+				// Extract session ID if this is a system message
+				if msgType, ok := sdkMsg["type"].(string); ok && msgType == "system" {
+					if sessionIDVal, ok := sdkMsg["session_id"].(string); ok && sessionIDVal != "" {
+						if currentSession.ID == "" {
+							currentSession.ID = sessionIDVal
+							if err := b.sessionManager.UpdateSessionID(currentSession.Name, sessionIDVal); err != nil {
+								log.Printf("[API] Warning: failed to update session ID: %v", err)
+							} else {
+								log.Printf("[API] Session ID set: %s", sessionIDVal)
+							}
+						}
+					}
+				}
+
+				// Extract text and tool_use content from assistant messages
+				if msgType, ok := sdkMsg["type"].(string); ok && msgType == "assistant" {
+					if msgData, ok := sdkMsg["message"].(map[string]interface{}); ok {
+						if content, ok := msgData["content"].([]interface{}); ok {
+							for _, item := range content {
+								if contentItem, ok := item.(map[string]interface{}); ok {
+									contentType, _ := contentItem["type"].(string)
+
+									// Extract text content
+									if contentType == "text" {
+										if text, ok := contentItem["text"].(string); ok {
+											log.Printf("[API] Extracted text content (length: %d): %s...", len(text), text[:min(50, len(text))])
+											// Append to last text event or create new one
+											if len(contentHistory) > 0 && contentHistory[len(contentHistory)-1].eventType == "text" {
+												contentHistory[len(contentHistory)-1].content += text
+											} else {
+												contentHistory = append(contentHistory, contentEvent{
+													eventType: "text",
+													content:   text,
+												})
+											}
+										}
+									}
+
+									// Extract tool usage
+									if contentType == "tool_use" {
+										toolName, _ := contentItem["name"].(string)
+										toolInput, _ := contentItem["input"].(map[string]interface{})
+										if toolName != "" {
+											toolStr := formatToolUsage(toolName, toolInput)
+											log.Printf("[API] Tool usage: %s", toolStr)
+											contentHistory = append(contentHistory, contentEvent{
+												eventType: "tool",
+												content:   toolStr,
+											})
+										}
+									}
+								}
+							}
+						}
+					}
+				}
+
+				// Update message with rate limiting
+				now := time.Now()
+				shouldUpdate := messageCount%3 == 0 || time.Since(lastEdit) >= 1000*time.Millisecond
+
+				if shouldUpdate && len(contentHistory) > 0 {
+					// Build chronological log from all events
+					var displayParts []string
+					for _, event := range contentHistory {
+						displayParts = append(displayParts, event.content)
+					}
+					displayText := strings.Join(displayParts, "\n\n")
+
+					log.Printf("[API] Updating message. History items: %d, Display length: %d", len(contentHistory), len(displayText))
+
+					if displayText != "" {
+						currentMessageID = b.updateOrSplitMessage(b.authChatID, currentMessageID, displayText, &sentCharCount, &messagePartNum)
+						lastEdit = now
+					}
+				}
+
+			case "done":
+				log.Printf("[API] ← Received %d messages from Claude", messageCount)
+
+				// Final update
+				if len(contentHistory) == 0 {
+					editMsg := tgbotapi.NewEditMessageText(b.authChatID, currentMessageID, "✅ Done (no output)")
+					editMsg.ReplyMarkup = nil
+					b.api.Send(editMsg)
+					return nil
+				}
+
+				// Build final display from all events
+				var displayParts []string
+				for _, event := range contentHistory {
+					displayParts = append(displayParts, event.content)
+				}
+				displayText := strings.Join(displayParts, "\n\n")
+
+				log.Printf("[API] Sending final response (length: %d)", len(displayText))
+
+				// Update message, splitting if necessary
+				currentMessageID = b.updateOrSplitMessage(b.authChatID, currentMessageID, displayText, &sentCharCount, &messagePartNum)
+
+				// Remove stop button from final message
+				editMarkup := tgbotapi.EditMessageReplyMarkupConfig{
+					BaseEdit: tgbotapi.BaseEdit{
+						ChatID:    b.authChatID,
+						MessageID: currentMessageID,
+					},
+				}
+				editMarkup.ReplyMarkup = nil
+				b.api.Send(editMarkup)
+				return nil
+
+			case "error":
+				log.Printf("[API] Claude error: %s", response.Error)
+				editMsg := tgbotapi.NewEditMessageText(
+					b.authChatID,
+					currentMessageID,
+					fmt.Sprintf("❌ Error: %s", response.Error),
+				)
+				editMsg.ReplyMarkup = nil
+				b.api.Send(editMsg)
+				return fmt.Errorf("claude error: %s", response.Error)
+			}
+		}
+	}
+}
+
+// ExecuteCommand executes a bot command programmatically (for API access)
+// NOTE: This function is deprecated and does not support per-chat context isolation.
+// It was intended for REST API access which is no longer implemented.
+// Commands should be sent via Telegram API to specific chats instead.
+// Returns the command result as a map
+func (b *Bot) ExecuteCommand(ctx context.Context, command string, args string) (map[string]interface{}, error) {
+	log.Printf("[Bot.ExecuteCommand] DEPRECATED: command=%q args=%q", command, args)
+
+	result := make(map[string]interface{})
+
+	switch command {
+	case "status":
+		currentSession := b.sessionManager.Current()
+		if currentSession == nil {
+			result["status"] = "no_session"
+			result["message"] = "No active session"
+		} else {
+			result["status"] = "active"
+			result["name"] = currentSession.Name
+			result["description"] = currentSession.Description
+			result["working_dir"] = currentSession.WorkingDir
+			result["created_at"] = currentSession.CreatedAt
+			result["last_used_at"] = currentSession.LastUsedAt
+			result["id"] = currentSession.ID
+		}
+		return result, nil
+
+	case "sessions":
+		sessions := b.sessionManager.List()
+		sessionList := make([]map[string]interface{}, 0, len(sessions))
+		for _, s := range sessions {
+			sessionList = append(sessionList, map[string]interface{}{
+				"name":        s.Name,
+				"description": s.Description,
+				"working_dir": s.WorkingDir,
+				"created_at":  s.CreatedAt,
+				"last_used_at": s.LastUsedAt,
+				"id":          s.ID,
+			})
+		}
+		result["sessions"] = sessionList
+		result["count"] = len(sessions)
+		return result, nil
+
+	case "pwd", "ls":
+		return nil, fmt.Errorf("command %s requires chat context - use Telegram API instead", command)
+
+	default:
+		return nil, fmt.Errorf("unsupported command: %s", command)
+	}
 }

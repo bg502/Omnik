@@ -5,8 +5,10 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 
+	"github.com/drew/omnik-bot/internal/api"
 	"github.com/drew/omnik-bot/internal/bot"
 	_ "github.com/joho/godotenv/autoload"
 )
@@ -40,6 +42,28 @@ func main() {
 		log.Println("Received shutdown signal, stopping bot...")
 		cancel()
 	}()
+
+	// Check if HTTP API is enabled
+	apiPort := 0
+	if portStr := os.Getenv("OMNI_API_PORT"); portStr != "" {
+		if p, err := strconv.Atoi(portStr); err == nil {
+			apiPort = p
+		}
+	}
+
+	// Start HTTP API server if enabled
+	if apiPort > 0 {
+		apiServer := api.New(apiPort, func(ctx context.Context, message string, sessionID string) error {
+			return b.ProcessAPIMessage(ctx, message, sessionID)
+		})
+
+		go func() {
+			log.Printf("Starting HTTP API server on port %d", apiPort)
+			if err := apiServer.Start(ctx); err != nil {
+				log.Printf("API server error: %v", err)
+			}
+		}()
+	}
 
 	// Start bot
 	log.Println("✓ Bot initialized successfully")
