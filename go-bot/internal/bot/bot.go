@@ -564,6 +564,16 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			text.WriteString(fmt.Sprintf("   Last used: %s\n\n", s.LastUsedAt.Format("2006-01-02 15:04")))
 		}
 
+		// Check for orphaned directories
+		orphaned := b.findOrphanedDirectories()
+		if len(orphaned) > 0 {
+			text.WriteString("⚠️ Orphaned directories (no active session):\n")
+			for _, dir := range orphaned {
+				text.WriteString(fmt.Sprintf("  • %s\n", dir))
+			}
+			text.WriteString("\n")
+		}
+
 		reply := tgbotapi.NewMessage(msg.Chat.ID, text.String())
 		reply.ReplyMarkup = b.createSessionsInlineKeyboard(sessions)
 		b.api.Send(reply)
@@ -582,8 +592,21 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			description = parts[1]
 		}
 
-		// Create new session
-		newSession, err := b.sessionManager.Create(name, description, "/workspace")
+		// Sanitize session name for directory creation
+		dirName := sanitizeSessionName(name)
+		sessionDir := fmt.Sprintf("/workspace/%s", dirName)
+
+		// Create session directory if it doesn't exist
+		if err := os.MkdirAll(sessionDir, 0755); err != nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID,
+				fmt.Sprintf("Error creating directory: %v", err)))
+			return
+		}
+
+		log.Printf("Created session directory: %s", sessionDir)
+
+		// Create new session with dedicated directory
+		newSession, err := b.sessionManager.Create(name, description, sessionDir)
 		if err != nil {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
 			return
@@ -592,7 +615,8 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 		// Update chat context
 		b.updateChatContext(msg.Chat.ID, newSession.Name, newSession.WorkingDir)
 
-		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Created and switched to session: %s", name)))
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID,
+			fmt.Sprintf("✅ Created session: %s\n📁 Working directory: %s", name, sessionDir)))
 
 	case "switch":
 		if args == "" {
@@ -622,13 +646,40 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			return
 		}
 
+		// Get session info before deleting (to show directory path)
+		sessionToDelete, err := b.sessionManager.Get(args)
+		if err != nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
+			return
+		}
+		deletedDir := sessionToDelete.WorkingDir
+
 		// Delete session
 		if err := b.sessionManager.Delete(args); err != nil {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
 			return
 		}
 
-		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Deleted session: %s", args)))
+		// Find orphaned directories
+		orphaned := b.findOrphanedDirectories()
+
+		// Build response message
+		var response strings.Builder
+		response.WriteString(fmt.Sprintf("✅ Deleted session: %s\n\n", args))
+		response.WriteString("⚠️ Note!\n")
+		response.WriteString(fmt.Sprintf("The directory %s still exists with your files.\n\n", deletedDir))
+
+		if len(orphaned) > 0 {
+			response.WriteString("📁 Orphaned directories (no active session):\n")
+			for _, dir := range orphaned {
+				response.WriteString(fmt.Sprintf("  • %s\n", dir))
+			}
+			response.WriteString("\nUse /cd to navigate and manually clean up if needed.")
+		} else {
+			response.WriteString("All directories in /workspace have active sessions.")
+		}
+
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, response.String()))
 
 	case "pwd":
 		b.execDirectCommand(msg, chatCtx.WorkingDir, "pwd")
@@ -1347,6 +1398,85 @@ func cleanPath(path string) string {
 		return "/"
 	}
 	return "/" + strings.Join(cleaned, "/")
+}
+
+// sanitizeSessionName converts a session name to a safe directory name
+func sanitizeSessionName(name string) string {
+	// Replace spaces with hyphens
+	sanitized := strings.ReplaceAll(name, " ", "-")
+
+	// Remove or replace unsafe characters
+	// Keep only: alphanumeric, hyphens, underscores, dots
+	var result strings.Builder
+	for _, r := range sanitized {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+		   (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			result.WriteRune(r)
+		}
+	}
+
+	sanitized = result.String()
+
+	// Ensure it's not empty and doesn't start with a dot
+	if sanitized == "" {
+		sanitized = "session"
+	}
+	if sanitized[0] == '.' {
+		sanitized = "session-" + sanitized
+	}
+
+	return sanitized
+}
+
+// findOrphanedDirectories finds directories in /workspace that don't have corresponding sessions
+func (b *Bot) findOrphanedDirectories() []string {
+	orphaned := []string{}
+
+	// Get all session working directories
+	sessions := b.sessionManager.List()
+	sessionDirs := []string{}
+	for _, s := range sessions {
+		sessionDirs = append(sessionDirs, s.WorkingDir)
+	}
+
+	// Read /workspace directory
+	entries, err := os.ReadDir("/workspace")
+	if err != nil {
+		log.Printf("Error reading /workspace: %v", err)
+		return orphaned
+	}
+
+	// Find directories that don't match any session
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue // Skip files
+		}
+
+		name := entry.Name()
+
+		// Skip hidden files/directories
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		dirPath := fmt.Sprintf("/workspace/%s", name)
+
+		// Check if this directory (or any subdirectory) is used by any session
+		isUsed := false
+		for _, sessionDir := range sessionDirs {
+			// Check if session's working dir is equal to or inside this directory
+			if sessionDir == dirPath || strings.HasPrefix(sessionDir, dirPath+"/") {
+				isUsed = true
+				break
+			}
+		}
+
+		if !isUsed {
+			orphaned = append(orphaned, dirPath)
+		}
+	}
+
+	return orphaned
 }
 
 // createMainKeyboard creates the main reply keyboard with common commands
