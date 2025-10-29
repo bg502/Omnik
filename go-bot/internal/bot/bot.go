@@ -4,9 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"log"
+	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -198,6 +201,12 @@ func (b *Bot) handleMessage(ctx context.Context, msg *tgbotapi.Message) {
 	// Log incoming message details
 	log.Printf("✅ Message from user %d in chat %d (type: %s, title: %q)",
 		msg.From.ID, msg.Chat.ID, msg.Chat.Type, msg.Chat.Title)
+
+	// Handle file uploads (documents, photos, etc.)
+	if msg.Document != nil || msg.Photo != nil {
+		go b.handleFileUpload(ctx, msg)
+		return
+	}
 
 	// Handle commands
 	if msg.IsCommand() {
@@ -484,7 +493,10 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 				"/ls - List files (ls -lah)\n"+
 				"/cd <path> - Change directory\n"+
 				"/cat <file> - Show file contents\n"+
+				"/sendfile <file> - Send file from workspace to chat\n"+
 				"/exec <cmd> - Execute bash command\n\n"+
+				"**File Upload:**\n"+
+				"Send any file or photo to upload it to your current working directory\n\n"+
 				"**Session Management:**\n"+
 				"/sessions - List all sessions\n"+
 				"/newsession <name> [description] - Create new session\n"+
@@ -564,6 +576,16 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			text.WriteString(fmt.Sprintf("   Last used: %s\n\n", s.LastUsedAt.Format("2006-01-02 15:04")))
 		}
 
+		// Check for orphaned directories
+		orphaned := b.findOrphanedDirectories()
+		if len(orphaned) > 0 {
+			text.WriteString("⚠️ Orphaned directories (no active session):\n")
+			for _, dir := range orphaned {
+				text.WriteString(fmt.Sprintf("  • %s\n", dir))
+			}
+			text.WriteString("\n")
+		}
+
 		reply := tgbotapi.NewMessage(msg.Chat.ID, text.String())
 		reply.ReplyMarkup = b.createSessionsInlineKeyboard(sessions)
 		b.api.Send(reply)
@@ -582,8 +604,21 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			description = parts[1]
 		}
 
-		// Create new session
-		newSession, err := b.sessionManager.Create(name, description, "/workspace")
+		// Sanitize session name for directory creation
+		dirName := sanitizeSessionName(name)
+		sessionDir := fmt.Sprintf("/workspace/%s", dirName)
+
+		// Create session directory if it doesn't exist
+		if err := os.MkdirAll(sessionDir, 0755); err != nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID,
+				fmt.Sprintf("Error creating directory: %v", err)))
+			return
+		}
+
+		log.Printf("Created session directory: %s", sessionDir)
+
+		// Create new session with dedicated directory
+		newSession, err := b.sessionManager.Create(name, description, sessionDir)
 		if err != nil {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
 			return
@@ -592,7 +627,8 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 		// Update chat context
 		b.updateChatContext(msg.Chat.ID, newSession.Name, newSession.WorkingDir)
 
-		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Created and switched to session: %s", name)))
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID,
+			fmt.Sprintf("✅ Created session: %s\n📁 Working directory: %s", name, sessionDir)))
 
 	case "switch":
 		if args == "" {
@@ -622,13 +658,40 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			return
 		}
 
+		// Get session info before deleting (to show directory path)
+		sessionToDelete, err := b.sessionManager.Get(args)
+		if err != nil {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
+			return
+		}
+		deletedDir := sessionToDelete.WorkingDir
+
 		// Delete session
 		if err := b.sessionManager.Delete(args); err != nil {
 			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Error: %v", err)))
 			return
 		}
 
-		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("Deleted session: %s", args)))
+		// Find orphaned directories
+		orphaned := b.findOrphanedDirectories()
+
+		// Build response message
+		var response strings.Builder
+		response.WriteString(fmt.Sprintf("✅ Deleted session: %s\n\n", args))
+		response.WriteString("⚠️ Note!\n")
+		response.WriteString(fmt.Sprintf("The directory %s still exists with your files.\n\n", deletedDir))
+
+		if len(orphaned) > 0 {
+			response.WriteString("📁 Orphaned directories (no active session):\n")
+			for _, dir := range orphaned {
+				response.WriteString(fmt.Sprintf("  • %s\n", dir))
+			}
+			response.WriteString("\nUse /cd to navigate and manually clean up if needed.")
+		} else {
+			response.WriteString("All directories in /workspace have active sessions.")
+		}
+
+		b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, response.String()))
 
 	case "pwd":
 		b.execDirectCommand(msg, chatCtx.WorkingDir, "pwd")
@@ -683,6 +746,68 @@ func (b *Bot) executeCommand(ctx context.Context, msg *tgbotapi.Message, command
 			filePath = chatCtx.WorkingDir + "/" + args
 		}
 		b.execDirectCommand(msg, chatCtx.WorkingDir, "cat", filePath)
+
+	case "sendfile":
+		if args == "" {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, "Usage: /sendfile <filename>"))
+			return
+		}
+
+		// Resolve file path (support both absolute and relative paths)
+		var filePath string
+		if filepath.IsAbs(args) {
+			filePath = args
+		} else {
+			filePath = filepath.Join(chatCtx.WorkingDir, args)
+		}
+
+		// Check if file exists
+		fileInfo, err := os.Stat(filePath)
+		if err != nil {
+			if os.IsNotExist(err) {
+				b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("❌ File not found: %s", args)))
+			} else {
+				b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("❌ Error checking file: %v", err)))
+			}
+			return
+		}
+
+		// Check if it's a directory
+		if fileInfo.IsDir() {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("❌ Cannot send directory: %s\n\nPlease specify a file.", args)))
+			return
+		}
+
+		// Check file size (Telegram has limits - 50MB for bots)
+		fileSizeMB := float64(fileInfo.Size()) / (1024 * 1024)
+		if fileSizeMB > 50 {
+			b.api.Send(tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("❌ File too large: %.2f MB\n\nTelegram limit for bots is 50 MB.", fileSizeMB)))
+			return
+		}
+
+		// Send "preparing file" message
+		sentMsg, _ := b.api.Send(tgbotapi.NewMessage(msg.Chat.ID,
+			fmt.Sprintf("📤 Preparing to send: %s (%.2f MB)...", args, fileSizeMB)))
+
+		// Send the file as document
+		doc := tgbotapi.NewDocument(msg.Chat.ID, tgbotapi.FilePath(filePath))
+		doc.Caption = fmt.Sprintf("📄 %s\n💾 Size: %.2f MB", filepath.Base(filePath), fileSizeMB)
+
+		_, err = b.api.Send(doc)
+		if err != nil {
+			log.Printf("❌ Failed to send file %s to chat %d: %v", filePath, msg.Chat.ID, err)
+			editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID,
+				fmt.Sprintf("❌ Failed to send file: %v", err))
+			b.api.Send(editMsg)
+			return
+		}
+
+		// Update status message to success
+		editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID,
+			fmt.Sprintf("✅ File sent successfully!\n\n📄 %s\n💾 %.2f MB", args, fileSizeMB))
+		b.api.Send(editMsg)
+
+		log.Printf("✓ Sent file %s to chat %d (%.2f MB)", filePath, msg.Chat.ID, fileSizeMB)
 
 	case "exec":
 		if args == "" {
@@ -1349,6 +1474,85 @@ func cleanPath(path string) string {
 	return "/" + strings.Join(cleaned, "/")
 }
 
+// sanitizeSessionName converts a session name to a safe directory name
+func sanitizeSessionName(name string) string {
+	// Replace spaces with hyphens
+	sanitized := strings.ReplaceAll(name, " ", "-")
+
+	// Remove or replace unsafe characters
+	// Keep only: alphanumeric, hyphens, underscores, dots
+	var result strings.Builder
+	for _, r := range sanitized {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') ||
+		   (r >= '0' && r <= '9') || r == '-' || r == '_' || r == '.' {
+			result.WriteRune(r)
+		}
+	}
+
+	sanitized = result.String()
+
+	// Ensure it's not empty and doesn't start with a dot
+	if sanitized == "" {
+		sanitized = "session"
+	}
+	if sanitized[0] == '.' {
+		sanitized = "session-" + sanitized
+	}
+
+	return sanitized
+}
+
+// findOrphanedDirectories finds directories in /workspace that don't have corresponding sessions
+func (b *Bot) findOrphanedDirectories() []string {
+	orphaned := []string{}
+
+	// Get all session working directories
+	sessions := b.sessionManager.List()
+	sessionDirs := []string{}
+	for _, s := range sessions {
+		sessionDirs = append(sessionDirs, s.WorkingDir)
+	}
+
+	// Read /workspace directory
+	entries, err := os.ReadDir("/workspace")
+	if err != nil {
+		log.Printf("Error reading /workspace: %v", err)
+		return orphaned
+	}
+
+	// Find directories that don't match any session
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue // Skip files
+		}
+
+		name := entry.Name()
+
+		// Skip hidden files/directories
+		if strings.HasPrefix(name, ".") {
+			continue
+		}
+
+		dirPath := fmt.Sprintf("/workspace/%s", name)
+
+		// Check if this directory (or any subdirectory) is used by any session
+		isUsed := false
+		for _, sessionDir := range sessionDirs {
+			// Check if session's working dir is equal to or inside this directory
+			if sessionDir == dirPath || strings.HasPrefix(sessionDir, dirPath+"/") {
+				isUsed = true
+				break
+			}
+		}
+
+		if !isUsed {
+			orphaned = append(orphaned, dirPath)
+		}
+	}
+
+	return orphaned
+}
+
 // createMainKeyboard creates the main reply keyboard with common commands
 func createMainKeyboard() tgbotapi.ReplyKeyboardMarkup {
 	return tgbotapi.NewReplyKeyboard(
@@ -1383,17 +1587,12 @@ func (b *Bot) createSessionsInlineKeyboard(sessions []*session.Session) tgbotapi
 			continue
 		}
 
-		row := tgbotapi.NewInlineKeyboardRow(
+		rows = append(rows, tgbotapi.NewInlineKeyboardRow(
 			tgbotapi.NewInlineKeyboardButtonData(
 				"➡️ Switch: "+s.Name,
 				"switch:"+s.Name,
 			),
-			tgbotapi.NewInlineKeyboardButtonData(
-				"🔧 MCP",
-				"mcp:"+s.Name,
-			),
-		)
-		rows = append(rows, row)
+		))
 	}
 
 	// Add "New Session" button
@@ -1415,6 +1614,97 @@ func (b *Bot) createSessionsInlineKeyboard(sessions []*session.Session) tgbotapi
 	}
 
 	return tgbotapi.NewInlineKeyboardMarkup(rows...)
+}
+
+// handleFileUpload handles file uploads from Telegram
+func (b *Bot) handleFileUpload(ctx context.Context, msg *tgbotapi.Message) {
+	// Get chat context to find current working directory
+	chatCtx := b.getChatContext(msg.Chat.ID)
+
+	// Determine which file type was sent
+	var fileID string
+	var fileName string
+
+	if msg.Document != nil {
+		// Handle documents (PDFs, text files, archives, etc.)
+		fileID = msg.Document.FileID
+		fileName = msg.Document.FileName
+	} else if msg.Photo != nil && len(msg.Photo) > 0 {
+		// Handle photos - get the largest resolution
+		largestPhoto := msg.Photo[len(msg.Photo)-1]
+		fileID = largestPhoto.FileID
+		fileName = fmt.Sprintf("photo_%d.jpg", msg.MessageID)
+	} else {
+		reply := tgbotapi.NewMessage(msg.Chat.ID, "❌ Unsupported file type")
+		b.api.Send(reply)
+		return
+	}
+
+	log.Printf("📥 File upload from chat %d: %s (FileID: %s)", msg.Chat.ID, fileName, fileID)
+
+	// Send processing message
+	processingMsg := tgbotapi.NewMessage(msg.Chat.ID, fmt.Sprintf("⏳ Uploading %s...", fileName))
+	sentMsg, err := b.api.Send(processingMsg)
+	if err != nil {
+		log.Printf("Failed to send processing message: %v", err)
+	}
+
+	// Get file info from Telegram
+	fileConfig := tgbotapi.FileConfig{FileID: fileID}
+	file, err := b.api.GetFile(fileConfig)
+	if err != nil {
+		log.Printf("❌ Failed to get file info: %v", err)
+		editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID,
+			fmt.Sprintf("❌ Failed to get file: %v", err))
+		b.api.Send(editMsg)
+		return
+	}
+
+	// Download file from Telegram servers
+	fileURL := file.Link(b.api.Token)
+	resp, err := http.Get(fileURL)
+	if err != nil {
+		log.Printf("❌ Failed to download file: %v", err)
+		editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID,
+			fmt.Sprintf("❌ Failed to download file: %v", err))
+		b.api.Send(editMsg)
+		return
+	}
+	defer resp.Body.Close()
+
+	// Read file content
+	fileContent, err := io.ReadAll(resp.Body)
+	if err != nil {
+		log.Printf("❌ Failed to read file content: %v", err)
+		editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID,
+			fmt.Sprintf("❌ Failed to read file: %v", err))
+		b.api.Send(editMsg)
+		return
+	}
+
+	// Save to working directory
+	filePath := filepath.Join(chatCtx.WorkingDir, fileName)
+	err = os.WriteFile(filePath, fileContent, 0644)
+	if err != nil {
+		log.Printf("❌ Failed to save file: %v", err)
+		editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID,
+			fmt.Sprintf("❌ Failed to save file: %v", err))
+		b.api.Send(editMsg)
+		return
+	}
+
+	fileSizeMB := float64(len(fileContent)) / (1024 * 1024)
+	log.Printf("✅ File saved: %s (%.2f MB) to %s", fileName, fileSizeMB, filePath)
+
+	// Send success message
+	editMsg := tgbotapi.NewEditMessageText(msg.Chat.ID, sentMsg.MessageID,
+		fmt.Sprintf("✅ File uploaded successfully!\n\n"+
+			"📄 Name: %s\n"+
+			"📊 Size: %.2f MB\n"+
+			"📁 Location: %s\n\n"+
+			"The file is now in your current working directory.",
+			fileName, fileSizeMB, chatCtx.WorkingDir))
+	b.api.Send(editMsg)
 }
 
 // LoadConfigFromEnv loads configuration from environment variables

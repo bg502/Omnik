@@ -1,0 +1,112 @@
+# ~/.bashrc for node user in omnik container
+# Ubuntu-style configuration with git aliases
+
+# If not running interactively, don't do anything
+case $- in
+    *i*) ;;
+      *) return;;
+esac
+
+# History configuration
+HISTCONTROL=ignoreboth
+HISTSIZE=1000
+HISTFILESIZE=2000
+shopt -s histappend
+
+# Check window size after each command
+shopt -s checkwinsize
+
+# Enable color support
+if [ -x /usr/bin/dircolors ]; then
+    test -r ~/.dircolors && eval "$(dircolors -b ~/.dircolors)" || eval "$(dircolors -b)"
+    alias ls='ls --color=auto'
+    alias grep='grep --color=auto'
+    alias fgrep='fgrep --color=auto'
+    alias egrep='egrep --color=auto'
+fi
+
+# Colored prompt with git branch support
+parse_git_branch() {
+    git branch 2> /dev/null | sed -e '/^[^*]/d' -e 's/* \(.*\)/ (\1)/'
+}
+
+# Ubuntu-style colored prompt: user@host:dir(git-branch)$
+if [ "$color_prompt" = yes ] || [ -n "$FORCE_COLOR" ]; then
+    PS1='\[\033[01;32m\]\u@\h\[\033[00m\]:\[\033[01;34m\]\w\[\033[01;33m\]$(parse_git_branch)\[\033[00m\]\$ '
+else
+    PS1='\u@\h:\w$(parse_git_branch)\$ '
+fi
+
+# Force colored prompt
+color_prompt=yes
+FORCE_COLOR=1
+
+# Standard aliases
+alias ll='ls -lah'
+alias la='ls -A'
+alias l='ls -CF'
+alias ..='cd ..'
+alias ...='cd ../..'
+alias ....='cd ../../..'
+
+# Git aliases (Oh-My-Zsh style)
+alias g='git'
+alias ga='git add'
+alias gaa='git add --all'
+alias gb='git branch'
+alias gba='git branch -a'
+alias gbd='git branch -d'
+alias gcb='git checkout -b'
+alias gco='git checkout'
+alias gcm='git checkout main'
+alias gcd='git checkout develop'
+alias gcp='git cherry-pick'
+alias gd='git diff'
+alias gds='git diff --staged'
+alias gf='git fetch'
+alias gfa='git fetch --all'
+alias gfo='git fetch origin'
+alias gl='git pull'
+alias glg='git log --stat'
+alias glog='git log --oneline --decorate --graph'
+alias gloga='git log --oneline --decorate --graph --all'
+alias gm='git merge'
+alias gp='git push'
+alias gpf='git push --force-with-lease'
+alias gpsup='git push --set-upstream origin $(git branch --show-current)'
+alias gr='git reset'
+alias grb='git rebase'
+alias gst='git status'
+alias gsta='git stash'
+alias gstp='git stash pop'
+
+# Docker aliases
+alias dps='docker ps'
+alias dpsa='docker ps -a'
+alias di='docker images'
+alias dex='docker exec -it'
+alias dlogs='docker logs'
+
+# Claude aliases
+alias cl='claude'
+alias cls='claude mcp list'
+
+# Workspace shortcuts
+alias ws='cd /workspace'
+
+# Enable programmable completion features
+if ! shopt -oq posix; then
+  if [ -f /usr/share/bash-completion/bash_completion ]; then
+    . /usr/share/bash-completion/bash_completion
+  elif [ -f /etc/bash_completion ]; then
+    . /etc/bash_completion
+  fi
+fi
+
+# Greeting message
+echo "🤖 Omnik Container - Node.js + Claude Code"
+echo "Working directory: $(pwd)"
+if command -v git &> /dev/null && git rev-parse --git-dir > /dev/null 2>&1; then
+    echo "Git branch: $(git branch --show-current)"
+fi
+echo ""

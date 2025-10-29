@@ -62,9 +62,10 @@ RUN mkdir -p /workspace /home/${USER}/.claude \
 # Copy Go binary from builder
 COPY --from=go-builder --chown=${USER}:${USER} /omnik-bot /app/omnik-bot
 
-# Copy git credential helper script and entrypoint
+# Copy git credential helper script, entrypoint, and bashrc template
 COPY --chown=${USER}:${USER} git-credential-helper.sh /app/git-credential-helper.sh
 COPY --chown=${USER}:${USER} entrypoint.sh /app/entrypoint.sh
+COPY --chown=${USER}:${USER} bashrc-node /app/.bashrc-template
 RUN chmod +x /app/git-credential-helper.sh /app/entrypoint.sh
 
 # Configure Claude CLI
